@@ -1,0 +1,69 @@
+# NanoClaw Codex Agent Container
+# Wraps `codex exec` CLI for non-interactive agent execution in isolated Linux VM
+
+FROM node:22-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    chromium \
+    fonts-liberation \
+    fonts-noto-color-emoji \
+    libgbm1 \
+    libnss3 \
+    libatk-bridge2.0-0 \
+    libgtk-3-0 \
+    libx11-xcb1 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    libasound2 \
+    libpangocairo-1.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxshmfence1 \
+    curl \
+    git \
+    grep \
+    findutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Chromium path for agent-browser
+ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
+ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
+
+# Install Codex CLI globally (the runner spawns `codex exec` as subprocess)
+RUN npm install -g @openai/codex
+
+# Create app directory with same structure as source
+WORKDIR /app/codex-runner
+
+# Copy package files for better caching
+COPY codex-runner/package*.json ./
+
+# Install dependencies
+RUN npm install
+
+# Copy shared code
+COPY shared/ /app/shared/
+
+# Copy runner source and config
+COPY codex-runner/ ./
+
+# Build TypeScript
+RUN npx tsc
+
+# Create workspace directories
+RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input
+
+# Create entrypoint script
+RUN printf '#!/bin/bash\nset -e\ncd /app/codex-runner && npx tsc --outDir /tmp/dist 2>&1 >&2\nln -s /app/codex-runner/node_modules /tmp/dist/codex-runner/node_modules 2>/dev/null || true\nchmod -R a-w /tmp/dist\ncat > /tmp/input.json\nnode /tmp/dist/codex-runner/src/index.js < /tmp/input.json\n' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+
+# Set ownership to node user
+RUN chown -R node:node /workspace && chmod 777 /home/node
+
+# Switch to non-root user
+USER node
+
+WORKDIR /workspace/group
+
+ENTRYPOINT ["/app/entrypoint.sh"]

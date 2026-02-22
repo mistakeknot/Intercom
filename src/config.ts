@@ -8,6 +8,8 @@ import { readEnvFile } from './env.js';
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
+  'TELEGRAM_BOT_TOKEN',
+  'TELEGRAM_ONLY',
 ]);
 
 export const ASSISTANT_NAME =
@@ -33,8 +35,20 @@ export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 export const MAIN_GROUP_FOLDER = 'main';
 
-export const CONTAINER_IMAGE =
-  process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
+// --- Multi-runtime support ---
+export type Runtime = 'claude' | 'gemini' | 'codex';
+
+export const DEFAULT_RUNTIME: Runtime =
+  (process.env.NANOCLAW_RUNTIME as Runtime) || 'claude';
+
+export const CONTAINER_IMAGES: Record<Runtime, string> = {
+  claude: process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest',
+  gemini: process.env.CONTAINER_IMAGE_GEMINI || 'nanoclaw-agent-gemini:latest',
+  codex: process.env.CONTAINER_IMAGE_CODEX || 'nanoclaw-agent-codex:latest',
+};
+
+// Legacy single image reference (for backward compat)
+export const CONTAINER_IMAGE = CONTAINER_IMAGES[DEFAULT_RUNTIME];
 export const CONTAINER_TIMEOUT = parseInt(
   process.env.CONTAINER_TIMEOUT || '1800000',
   10,
@@ -66,3 +80,9 @@ export const TRIGGER_PATTERN = new RegExp(
 // Uses system timezone by default
 export const TIMEZONE =
   process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+// --- Telegram channel ---
+export const TELEGRAM_BOT_TOKEN =
+  process.env.TELEGRAM_BOT_TOKEN || envConfig.TELEGRAM_BOT_TOKEN || '';
+export const TELEGRAM_ONLY =
+  (process.env.TELEGRAM_ONLY || envConfig.TELEGRAM_ONLY) === 'true';

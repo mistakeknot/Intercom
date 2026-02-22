@@ -8,12 +8,14 @@ import os from 'os';
 import path from 'path';
 
 import {
-  CONTAINER_IMAGE,
+  CONTAINER_IMAGES,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
   DATA_DIR,
+  DEFAULT_RUNTIME,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  type Runtime,
 } from './config.js';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
@@ -61,6 +63,7 @@ interface VolumeMount {
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
+  runtime: Runtime = 'claude',
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const homeDir = getHomeDir();
@@ -100,53 +103,49 @@ function buildVolumeMounts(
     }
   }
 
-  // Per-group Claude sessions directory (isolated from other groups)
-  // Each group gets their own .claude/ to prevent cross-group session access
-  const groupSessionsDir = path.join(
-    DATA_DIR,
-    'sessions',
-    group.folder,
-    '.claude',
-  );
-  fs.mkdirSync(groupSessionsDir, { recursive: true });
-  const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  if (!fs.existsSync(settingsFile)) {
-    fs.writeFileSync(settingsFile, JSON.stringify({
-      env: {
-        // Enable agent swarms (subagent orchestration)
-        // https://code.claude.com/docs/en/agent-teams#orchestrate-teams-of-claude-code-sessions
-        CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-        // Load CLAUDE.md from additional mounted directories
-        // https://code.claude.com/docs/en/memory#load-memory-from-additional-directories
-        CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-        // Enable Claude's memory feature (persists user preferences between sessions)
-        // https://code.claude.com/docs/en/memory#manage-auto-memory
-        CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
-      },
-    }, null, 2) + '\n');
-  }
+  // Claude runtime: per-group .claude/ sessions directory with settings and skills
+  // Non-Claude runtimes skip this — they manage sessions internally as JSON files
+  if (runtime === 'claude') {
+    const groupSessionsDir = path.join(
+      DATA_DIR,
+      'sessions',
+      group.folder,
+      '.claude',
+    );
+    fs.mkdirSync(groupSessionsDir, { recursive: true });
+    const settingsFile = path.join(groupSessionsDir, 'settings.json');
+    if (!fs.existsSync(settingsFile)) {
+      fs.writeFileSync(settingsFile, JSON.stringify({
+        env: {
+          CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+          CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
+          CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+        },
+      }, null, 2) + '\n');
+    }
 
-  // Sync skills from container/skills/ into each group's .claude/skills/
-  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
-  const skillsDst = path.join(groupSessionsDir, 'skills');
-  if (fs.existsSync(skillsSrc)) {
-    for (const skillDir of fs.readdirSync(skillsSrc)) {
-      const srcDir = path.join(skillsSrc, skillDir);
-      if (!fs.statSync(srcDir).isDirectory()) continue;
-      const dstDir = path.join(skillsDst, skillDir);
-      fs.mkdirSync(dstDir, { recursive: true });
-      for (const file of fs.readdirSync(srcDir)) {
-        const srcFile = path.join(srcDir, file);
-        const dstFile = path.join(dstDir, file);
-        fs.copyFileSync(srcFile, dstFile);
+    // Sync skills from container/skills/ into each group's .claude/skills/
+    const skillsSrc = path.join(process.cwd(), 'container', 'skills');
+    const skillsDst = path.join(groupSessionsDir, 'skills');
+    if (fs.existsSync(skillsSrc)) {
+      for (const skillDir of fs.readdirSync(skillsSrc)) {
+        const srcDir = path.join(skillsSrc, skillDir);
+        if (!fs.statSync(srcDir).isDirectory()) continue;
+        const dstDir = path.join(skillsDst, skillDir);
+        fs.mkdirSync(dstDir, { recursive: true });
+        for (const file of fs.readdirSync(srcDir)) {
+          const srcFile = path.join(srcDir, file);
+          const dstFile = path.join(dstDir, file);
+          fs.copyFileSync(srcFile, dstFile);
+        }
       }
     }
+    mounts.push({
+      hostPath: groupSessionsDir,
+      containerPath: '/home/node/.claude',
+      readonly: false,
+    });
   }
-  mounts.push({
-    hostPath: groupSessionsDir,
-    containerPath: '/home/node/.claude',
-    readonly: false,
-  });
 
   // Per-group IPC namespace: each group gets its own IPC directory
   // This prevents cross-group privilege escalation via IPC
@@ -162,12 +161,37 @@ function buildVolumeMounts(
 
   // Mount agent-runner source from host — recompiled on container startup.
   // Bypasses sticky build cache for code changes.
-  const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
-  mounts.push({
-    hostPath: agentRunnerSrc,
-    containerPath: '/app/src',
-    readonly: true,
-  });
+  // Each runtime has its own runner source directory and container layout.
+  const runnerDirMap: Record<Runtime, string> = {
+    claude: 'agent-runner',
+    gemini: 'gemini-runner',
+    codex: 'codex-runner',
+  };
+  const runnerSrc = path.join(projectRoot, 'container', runnerDirMap[runtime], 'src');
+  if (fs.existsSync(runnerSrc)) {
+    // Claude: runner lives at /app/src (flat layout)
+    // Gemini/Codex: runner lives at /app/{runner}/src (nested to preserve ../../shared imports)
+    const containerRunnerPath = runtime === 'claude'
+      ? '/app/src'
+      : `/app/${runnerDirMap[runtime]}/src`;
+    mounts.push({
+      hostPath: runnerSrc,
+      containerPath: containerRunnerPath,
+      readonly: true,
+    });
+  }
+
+  // Non-Claude runtimes also need the shared code mounted
+  if (runtime !== 'claude') {
+    const sharedSrc = path.join(projectRoot, 'container', 'shared');
+    if (fs.existsSync(sharedSrc)) {
+      mounts.push({
+        hostPath: sharedSrc,
+        containerPath: '/app/shared',
+        readonly: true,
+      });
+    }
+  }
 
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
@@ -185,12 +209,21 @@ function buildVolumeMounts(
 /**
  * Read allowed secrets from .env for passing to the container via stdin.
  * Secrets are never written to disk or mounted as files.
+ * All runtime secrets are read — the container uses what it needs.
  */
 function readSecrets(): Record<string, string> {
-  return readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
+  return readEnvFile([
+    // Claude
+    'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY',
+    // Gemini (Code Assist API)
+    'GEMINI_REFRESH_TOKEN', 'GEMINI_OAUTH_CLIENT_ID', 'GEMINI_OAUTH_CLIENT_SECRET',
+    // Codex/OpenAI
+    'CODEX_OAUTH_ACCESS_TOKEN', 'CODEX_OAUTH_REFRESH_TOKEN',
+    'CODEX_OAUTH_ID_TOKEN', 'CODEX_OAUTH_ACCOUNT_ID',
+  ]);
 }
 
-function buildContainerArgs(mounts: VolumeMount[], containerName: string): string[] {
+function buildContainerArgs(mounts: VolumeMount[], containerName: string, runtime: Runtime): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
   // Run as host user so bind-mounted files are accessible.
@@ -211,7 +244,7 @@ function buildContainerArgs(mounts: VolumeMount[], containerName: string): strin
     }
   }
 
-  args.push(CONTAINER_IMAGE);
+  args.push(CONTAINER_IMAGES[runtime]);
 
   return args;
 }
@@ -227,10 +260,11 @@ export async function runContainerAgent(
   const groupDir = path.join(GROUPS_DIR, group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = buildVolumeMounts(group, input.isMain);
+  const runtime: Runtime = group.runtime || DEFAULT_RUNTIME;
+  const mounts = buildVolumeMounts(group, input.isMain, runtime);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName);
+  const containerArgs = buildContainerArgs(mounts, containerName, runtime);
 
   logger.debug(
     {
@@ -251,6 +285,7 @@ export async function runContainerAgent(
       containerName,
       mountCount: mounts.length,
       isMain: input.isMain,
+      runtime,
     },
     'Spawning container agent',
   );

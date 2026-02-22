@@ -39,6 +39,7 @@ export interface RegisteredGroup {
   added_at: string;
   containerConfig?: ContainerConfig;
   requiresTrigger?: boolean; // Default: true for groups, false for solo chats
+  runtime?: 'claude' | 'gemini' | 'codex'; // Default: uses DEFAULT_RUNTIME from config
 }
 
 export interface NewMessage {

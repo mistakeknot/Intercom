@@ -1,0 +1,73 @@
+# NanoClaw Gemini Agent Container
+# Runs Gemini agent with OAuth authentication in isolated Linux VM
+
+FROM node:22-slim
+
+# Install system dependencies (same as Claude container minus claude-code)
+RUN apt-get update && apt-get install -y \
+    chromium \
+    fonts-liberation \
+    fonts-noto-color-emoji \
+    libgbm1 \
+    libnss3 \
+    libatk-bridge2.0-0 \
+    libgtk-3-0 \
+    libx11-xcb1 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    libasound2 \
+    libpangocairo-1.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxshmfence1 \
+    curl \
+    git \
+    grep \
+    findutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Chromium path for agent-browser
+ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
+ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
+
+# Create app directory with same structure as source:
+#   /app/gemini-runner/src/   (runner code)
+#   /app/shared/              (shared code)
+# This preserves the ../../shared/ import paths
+WORKDIR /app/gemini-runner
+
+# Copy package files for better caching
+COPY gemini-runner/package*.json ./
+
+# Install dependencies
+RUN npm install
+
+# Copy shared code
+COPY shared/ /app/shared/
+
+# Copy runner source and config
+COPY gemini-runner/ ./
+
+# Build TypeScript (rootDir is .. which is /app)
+RUN npx tsc
+
+# Create workspace directories
+RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input
+
+# Create entrypoint script
+# Recompiles TypeScript on startup (allows live code changes via host-mounted source)
+# Host mounts: runner src → /app/gemini-runner/src, shared → /app/shared
+# Output goes to /tmp/dist/gemini-runner/src/index.js (matching rootDir: "..")
+# Secrets are passed via stdin JSON — temp file is deleted immediately after Node reads it
+RUN printf '#!/bin/bash\nset -e\ncd /app/gemini-runner && npx tsc --outDir /tmp/dist 2>&1 >&2\nln -s /app/gemini-runner/node_modules /tmp/dist/gemini-runner/node_modules 2>/dev/null || true\nchmod -R a-w /tmp/dist\ncat > /tmp/input.json\nnode /tmp/dist/gemini-runner/src/index.js < /tmp/input.json\n' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+
+# Set ownership to node user
+RUN chown -R node:node /workspace && chmod 777 /home/node
+
+# Switch to non-root user
+USER node
+
+WORKDIR /workspace/group
+
+ENTRYPOINT ["/app/entrypoint.sh"]
