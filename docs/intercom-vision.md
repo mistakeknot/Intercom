@@ -1,8 +1,8 @@
 # Intercom — Vision Document
 
-**Version:** 0.1
+**Version:** 0.2
 **Date:** 2026-02-22
-**Status:** Draft (brainstorm-grade)
+**Status:** Draft (all open questions resolved, ready for strategy)
 **See also:** [Demarch vision](../../../docs/demarch-vision.md), [Autarch vision](../../autarch/docs/autarch-vision.md), [Intercore roadmap](../../../core/intercore/docs/intercore-roadmap.md)
 
 ---
@@ -260,25 +260,11 @@ Today, Intercom is an application. Nothing depends on it. You can remove it and 
 
 The answer changes if Intercom evolves into a **communication substrate** — a layer that other modules route through to reach humans. If Clavain sends gate-approval requests through Intercom, if Interflux routes review summaries through Intercom, if Intercore sends budget alerts through Intercom... then Intercom is no longer an app. It's infrastructure. And infrastructure belongs in a different layer.
 
-**Possible future positioning:**
+**Promotion criteria (explicit):** Intercom remains a Layer 3 app until at least one of:
+- (a) Another L2 module (Clavain, an Interverse driver) has a **hard dependency** on Intercom for a production workflow
+- (b) Intercom's removal would **break a workflow** that does not involve a messaging channel
 
-```
-Layer 3: Apps (Autarch)              ← TUI surfaces
-├── Bigend, Gurgeh, Coldwine, Pollard
-
-Layer 2.5: Gateway (Intercom)        ← external communication surface
-├── Channel routing (Telegram, WhatsApp, ...)
-├── Event bridge (kernel → messaging)
-├── Intent translation (messaging → kernel)
-└── Multi-runtime agent execution
-
-Layer 2: OS (Clavain) + Drivers (Interverse)
-Layer 1: Kernel (Intercore)
-```
-
-This "Layer 2.5" framing acknowledges that Intercom sits *between* the OS and the apps — it's not a pure consumer of kernel state (like Autarch), and it's not a policy engine (like Clavain). It's a **boundary layer** between the agency and the external world.
-
-But this is a future consideration. The three horizons above don't require reclassification. Each horizon works with Intercom living under `apps/`.
+Until then, Intercom lives under `apps/` regardless of internal complexity. Complexity within a layer boundary is not grounds for promotion. The three horizons above don't require reclassification.
 
 ## What Intercom Is Not
 
@@ -310,20 +296,73 @@ Intercom responses should be conversational, not formatted like terminal output.
 
 The host process doesn't know or care whether a message came from Telegram or WhatsApp. The Channel interface abstracts this. New channels (Discord, Slack, email, SMS) plug in without touching the orchestration or agent layers.
 
+## Resolved Decisions
+
+### Q1: Container Access to Kernel — IPC Bridge (Option B)
+
+**Decision:** All kernel queries and mutations route through a host-mediated IPC bridge. No binary mounting, no HTTP API, no direct database access from containers.
+
+```
+Container Agent
+  │ writes /workspace/ipc/queries/{uuid}.json
+  │   { "type": "run_status", "params": { "run_id": "..." } }
+  │
+  ▼
+Host Process (polls ipc/queries/)
+  │ validates query against group permissions
+  │ executes: ic run status --json
+  │ writes /workspace/ipc/responses/{uuid}.json
+  │
+  ▼
+Container Agent (polls for response)
+  │ reads response JSON
+```
+
+**Why:** Three independent reviews (architecture, safety, user-product) converged on this option:
+- **Architecture:** Single mechanism for H1 reads and H2 writes. Building Option A for H1 and retrofitting to B for H2 creates two code paths. B from the start amortizes the infrastructure.
+- **Safety:** Host mediates all kernel access, enabling per-group authorization. Options A and C both expose attack surface (direct DB access, network port) that the host-mediated model avoids.
+- **UX:** ~1-2s round-trip latency is invisible in messaging context. This is not a TUI rendering at interactive frame rates.
+
+**Rejected alternatives:**
+- Option A (mount `ic` binary): Requires mounting the SQLite DB too. Container agents with `run_shell_command` could run arbitrary `sqlite3` queries against every table. Exposes all `ic` subcommands, not just the intended seven.
+- Option C (HTTP API): Opens network port on host. Containers currently have no network access — that's a deliberate security invariant. Premature for H1/H2.
+- Option D alone (snapshots): Data stale after container spawn. "What's the current phase?" could be wrong. Acceptable as a performance complement but not as the primary mechanism.
+
+### Q1b: Write-Path Safety — Tiered Model
+
+**Decision:** Kernel mutations are classified into two tiers at the host level:
+
+| Tier | Operations | Behavior |
+|------|-----------|----------|
+| **Auto-execute** | Create bead, log discovery, register finding, query state | Host validates and executes immediately |
+| **Human-confirm** | Gate override, phase advance, run creation, run cancellation | Host posts confirmation request to chat; waits for explicit human reply before executing |
+
+The classification maps to the Autarch write-path contract: operations that are "policy-governing" (per Clavain's definition) require confirmation. Operations that are informational or reversible auto-execute. The host maintains the tier classification — containers cannot self-promote an operation to auto-execute.
+
+**Write-path rule (explicit):** All policy-governing mutations route through Clavain's CLI, not directly to `ic`. Direct `ic` reads are permitted at the host level. Bead operations (`bd create`, `bd close`) are classified as auto-execute (reversible, non-policy-governing).
+
+### Q1c: Claude Runtime — Dual Implementation
+
+**Decision:** Shared IPC bridge logic in `container/shared/ipc-demarch.ts`. Runtime-specific tool declarations:
+- **Claude:** MCP tools in `container/agent-runner/src/demarch-mcp.ts` (server.tool() declarations)
+- **Gemini/Codex:** Executor functions in `container/shared/demarch-tools.ts`
+
+Both call the same `queryKernel()` and `awaitResponse()` functions from the shared IPC module.
+
 ## Open Questions
 
-1. **Container access to kernel.** H1 tools need `ic` inside containers. Options: (a) mount the `ic` binary read-only, (b) IPC-bridge all queries through the host, (c) HTTP API on the host that containers can call. Each has different security/latency tradeoffs.
+1. ~~Container access to kernel.~~ **Resolved: IPC bridge (Option B) with tiered write safety.**
 
-2. **Event delivery latency.** `ic events tail` is polling-based. For real-time messaging, should Intercom use Autarch's signal broker pattern, or is a simple poll loop sufficient?
+2. ~~Event delivery latency.~~ **Resolved: 1-second poll loop.** `ic events tail --consumer=intercom` in a 1-second polling loop on the host. Local SQLite read, negligible load. No need for Autarch's signal broker pattern (that's a rendering optimization for in-process TUI consumers, not appropriate for a separate host process). The consumer cursor is a singleton — exactly one Intercom host process owns it at a time.
 
-3. **Multi-user identity.** H3 needs user identity (who sent this message). The kernel doesn't model individual users — it models runs and dispatches. Where does user identity live? Intercom's own DB? Intermute?
+3. ~~Multi-user identity.~~ **Deferred to H3.** Identity is an H3 concern, not H1/H2. Documented constraints: (a) never trust Telegram/WhatsApp group membership as authorization — external servers control membership, not us; (b) role enforcement must live entirely on the host side; (c) identity store must be channel-agnostic (same user across Telegram + WhatsApp). H2's IPC intents include `chatJid` — adding a `userId` field later is additive, not breaking.
 
-4. **Gate approval UX.** When a gate needs human approval, what does the message look like? Inline buttons (Telegram supports these)? A reply keyword? How does the system handle approval timeout?
+4. ~~Gate approval UX.~~ **Resolved: Inline buttons with keyword fallback.** Telegram: inline keyboard buttons (Approve/Reject/Defer) via Bot API callback queries — one-tap, structured, no parsing ambiguity. WhatsApp: fallback to reply keywords (`APPROVE <code>`, `REJECT <code>`, `DEFER <code>`). Both paths bypass the LLM entirely — button press or keyword reply goes directly to the host process. Timeout: configurable (default 1h), auto-defer on expiry with notification. First reply wins; duplicates get "already resolved." Every approval/rejection recorded in kernel event log with timestamp and user JID.
 
-5. **Interbus vs direct integration.** Should H2 wait for Interbus (`iv-psf2`), or proceed with direct `ic` calls and retrofit later? Direct integration ships faster but may need refactoring.
+5. ~~Interbus vs direct integration.~~ **Resolved: Direct first, Interbus adapter later.** H2 calls `ic` and `bd` directly from the host process. When Interbus ships, add an adapter that translates IPC intents to Interbus events. Direct `ic` calls remain as fallback — H3 uses Interbus if available, direct polling if not. This avoids blocking on an unbuilt dependency while keeping the retrofit path additive (adapter, not rewrite).
 
-6. **Token attribution.** When an Intercom agent queries the kernel or runs tools, who "pays" for the tokens? The Intercom conversation? The kernel run? Both? This matters for budget enforcement.
+6. ~~Token attribution.~~ **Resolved: Intercom pays its own.** Intercom conversations have separate token accounting from kernel runs. IPC queries are host-side CLI calls (0 LLM tokens). Agent reasoning tokens are Intercom's cost, never charged to a kernel run. When Intercom triggers a run (H2), the run pays for its own dispatches from the moment it's created. Clean separation — run budgets stay predictable, Intercom can't accidentally drain them.
 
 ---
 
-*This is a brainstorm-grade vision document. It captures the direction, not the plan. Implementation details, sequencing, and commitment decisions happen in strategy and planning phases.*
+*Vision document with all architectural decisions resolved via multi-agent review (architecture, safety, user-product). Ready for strategy and planning phases. Implementation details and sequencing are next.*
