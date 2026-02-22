@@ -5,6 +5,7 @@
 
 import * as executor from '../../shared/executor.js';
 import * as ipcTools from '../../shared/ipc-tools.js';
+import * as demarchTools from '../../shared/demarch-tools.js';
 import type { IpcContext } from '../../shared/ipc-tools.js';
 import { log } from '../../shared/protocol.js';
 
@@ -176,6 +177,68 @@ export function getToolDeclarations(isMain: boolean): ToolDeclaration[] {
     },
   ];
 
+  // Demarch platform tools
+  tools.push(
+    {
+      name: 'demarch_run_status',
+      description: 'Query current sprint/run status from the Demarch kernel.',
+      parameters: {
+        type: 'object',
+        properties: {
+          run_id: { type: 'string', description: 'Specific run ID (optional, defaults to current)' },
+        },
+      },
+    },
+    {
+      name: 'demarch_sprint_phase',
+      description: 'Get the current phase of the active sprint.',
+      parameters: { type: 'object', properties: {} },
+    },
+    {
+      name: 'demarch_search_beads',
+      description: 'Search work items (beads) by status or keyword.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'Specific bead ID to look up' },
+          query: { type: 'string', description: 'Search keyword' },
+          status: { type: 'string', description: 'Filter: open, in_progress, closed' },
+        },
+      },
+    },
+    {
+      name: 'demarch_spec_lookup',
+      description: 'Look up spec artifacts (PRDs, requirements).',
+      parameters: {
+        type: 'object',
+        properties: {
+          artifact_id: { type: 'string', description: 'Specific artifact ID (optional)' },
+        },
+      },
+    },
+    {
+      name: 'demarch_review_summary',
+      description: 'Get the latest code review summary.',
+      parameters: { type: 'object', properties: {} },
+    },
+    {
+      name: 'demarch_next_work',
+      description: 'Get prioritized recommendations for what to work on next.',
+      parameters: { type: 'object', properties: {} },
+    },
+    {
+      name: 'demarch_run_events',
+      description: 'Query recent kernel events (phase transitions, dispatches).',
+      parameters: {
+        type: 'object',
+        properties: {
+          limit: { type: 'number', description: 'Max events to return (default: 20)' },
+          since: { type: 'string', description: 'ISO timestamp — events after this time' },
+        },
+      },
+    },
+  );
+
   if (isMain) {
     tools.push({
       name: 'register_group',
@@ -199,11 +262,11 @@ export function getToolDeclarations(isMain: boolean): ToolDeclaration[] {
 /**
  * Execute a tool call and return the result string.
  */
-export function executeTool(
+export async function executeTool(
   name: string,
   args: Record<string, unknown>,
   ipcCtx: IpcContext,
-): string {
+): Promise<string> {
   log(`Executing tool: ${name}`);
 
   switch (name) {
@@ -280,7 +343,51 @@ export function executeTool(
         args.trigger as string,
       );
 
+    // Demarch platform tools (async — return promises)
+    case 'demarch_run_status':
+    case 'demarch_sprint_phase':
+    case 'demarch_search_beads':
+    case 'demarch_spec_lookup':
+    case 'demarch_review_summary':
+    case 'demarch_next_work':
+    case 'demarch_run_events':
+      return executeDemarchTool(name, args, ipcCtx);
+
     default:
       return `Unknown tool: ${name}`;
+  }
+}
+
+async function executeDemarchTool(
+  name: string,
+  args: Record<string, unknown>,
+  ipcCtx: IpcContext,
+): Promise<string> {
+  switch (name) {
+    case 'demarch_run_status':
+      return demarchTools.demarchRunStatus(ipcCtx, args.run_id as string | undefined);
+    case 'demarch_sprint_phase':
+      return demarchTools.demarchSprintPhase(ipcCtx);
+    case 'demarch_search_beads':
+      return demarchTools.demarchSearchBeads(
+        ipcCtx,
+        args.id as string | undefined,
+        args.query as string | undefined,
+        args.status as string | undefined,
+      );
+    case 'demarch_spec_lookup':
+      return demarchTools.demarchSpecLookup(ipcCtx, args.artifact_id as string | undefined);
+    case 'demarch_review_summary':
+      return demarchTools.demarchReviewSummary(ipcCtx);
+    case 'demarch_next_work':
+      return demarchTools.demarchNextWork(ipcCtx);
+    case 'demarch_run_events':
+      return demarchTools.demarchRunEvents(
+        ipcCtx,
+        args.limit as number | undefined,
+        args.since as string | undefined,
+      );
+    default:
+      return `Unknown Demarch tool: ${name}`;
   }
 }

@@ -12,6 +12,7 @@ import {
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { logger } from './logger.js';
+import { handleQuery } from './query-handlers.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
@@ -141,6 +142,54 @@ export function startIpcWatcher(deps: IpcDeps): void {
         }
       } catch (err) {
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
+      }
+
+      // Process Demarch kernel queries from this group's IPC directory
+      const queriesDir = path.join(ipcBaseDir, sourceGroup, 'queries');
+      const responsesDir = path.join(ipcBaseDir, sourceGroup, 'responses');
+      try {
+        if (fs.existsSync(queriesDir)) {
+          const queryFiles = fs
+            .readdirSync(queriesDir)
+            .filter((f) => f.endsWith('.json'));
+          for (const file of queryFiles) {
+            const filePath = path.join(queriesDir, file);
+            try {
+              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              const { uuid, type, params } = data;
+              if (!uuid || !type) {
+                logger.warn({ file, sourceGroup }, 'Invalid query file — missing uuid or type');
+                fs.unlinkSync(filePath);
+                continue;
+              }
+              const response = handleQuery(type, params || {}, sourceGroup, isMain);
+              // Write response atomically
+              fs.mkdirSync(responsesDir, { recursive: true });
+              const responsePath = path.join(responsesDir, `${uuid}.json`);
+              const tempPath = `${responsePath}.tmp`;
+              fs.writeFileSync(tempPath, JSON.stringify(response, null, 2));
+              fs.renameSync(tempPath, responsePath);
+              fs.unlinkSync(filePath);
+              logger.debug(
+                { type, uuid, sourceGroup, status: response.status },
+                'Demarch query processed',
+              );
+            } catch (err) {
+              logger.error(
+                { file, sourceGroup, err },
+                'Error processing Demarch query',
+              );
+              const errorDir = path.join(ipcBaseDir, 'errors');
+              fs.mkdirSync(errorDir, { recursive: true });
+              fs.renameSync(
+                filePath,
+                path.join(errorDir, `${sourceGroup}-query-${file}`),
+              );
+            }
+          }
+        }
+      } catch (err) {
+        logger.error({ err, sourceGroup }, 'Error reading IPC queries directory');
       }
     }
 

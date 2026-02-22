@@ -75,6 +75,17 @@ export function buildSystemPrompt(
     parts.push('- **register_group**: Register a new messaging group (main only).');
   }
   parts.push('');
+  parts.push('## Demarch Platform Tools');
+  parts.push('');
+  parts.push('These tools connect you to the Demarch development platform. Use them to understand project context:');
+  parts.push('- **demarch_run_status**: Query current sprint/run status from the Demarch kernel.');
+  parts.push('- **demarch_sprint_phase**: Get the current phase of the active sprint.');
+  parts.push('- **demarch_search_beads**: Search work items (beads) by status or keyword.');
+  parts.push('- **demarch_spec_lookup**: Look up spec artifacts (PRDs, requirements).');
+  parts.push('- **demarch_review_summary**: Get the latest code review summary.');
+  parts.push('- **demarch_next_work**: Get prioritized recommendations for what to work on next.');
+  parts.push('- **demarch_run_events**: Query recent kernel events (phase transitions, dispatches).');
+  parts.push('');
   parts.push('# Guidelines');
   parts.push('');
   parts.push('- Read files before editing them.');

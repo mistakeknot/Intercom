@@ -262,17 +262,17 @@ async function runQuery(
       contents.push({ role: 'model', parts: modelParts });
 
       // Execute all function calls
-      const responseParts: ContentPart[] = functionCalls.map(p => {
+      const responseParts: ContentPart[] = await Promise.all(functionCalls.map(async (p) => {
         const name = p.functionCall?.name || 'unknown';
         const args = (p.functionCall?.args || {}) as Record<string, unknown>;
-        const toolResult = executeTool(name, args, ipcCtx);
+        const toolResult = await executeTool(name, args, ipcCtx);
         return {
           functionResponse: {
             name,
             response: { result: toolResult },
           },
         };
-      });
+      }));
       contents.push({ role: 'user', parts: responseParts });
 
       continue;

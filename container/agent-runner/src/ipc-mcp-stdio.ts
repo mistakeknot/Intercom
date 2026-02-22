@@ -7,6 +7,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
@@ -271,6 +272,129 @@ Use available_groups.json to find the JID for a group. The folder name should be
     return {
       content: [{ type: 'text' as const, text: `Group "${args.name}" registered. It will start receiving messages immediately.` }],
     };
+  },
+);
+
+// --- Demarch IPC Query Bridge ---
+
+const QUERIES_DIR = path.join(IPC_DIR, 'queries');
+const RESPONSES_DIR = path.join(IPC_DIR, 'responses');
+
+async function queryKernel(type: string, params: Record<string, unknown> = {}): Promise<string> {
+  const uuid = crypto.randomUUID();
+  const query = { uuid, type, params, timestamp: new Date().toISOString() };
+
+  fs.mkdirSync(QUERIES_DIR, { recursive: true });
+  const queryPath = path.join(QUERIES_DIR, `${uuid}.json`);
+  const tempPath = `${queryPath}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(query, null, 2));
+  fs.renameSync(tempPath, queryPath);
+
+  const responsePath = path.join(RESPONSES_DIR, `${uuid}.json`);
+  const deadline = Date.now() + 30_000;
+
+  while (Date.now() < deadline) {
+    if (fs.existsSync(responsePath)) {
+      try {
+        const raw = fs.readFileSync(responsePath, 'utf-8');
+        const response = JSON.parse(raw);
+        try { fs.unlinkSync(responsePath); } catch { /* ignore */ }
+        if (response.status === 'error') return `Error: ${response.result || 'Unknown error'}`;
+        return response.result || '';
+      } catch (err) {
+        return `Error parsing response: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+
+  try { fs.unlinkSync(queryPath); } catch { /* ignore */ }
+  return 'Error: Query timed out — Demarch kernel may not be available.';
+}
+
+// --- Demarch Platform Tools ---
+
+server.tool(
+  'demarch_run_status',
+  'Query current sprint/run status from the Demarch kernel. Returns JSON with run ID, phase, status, and metadata.',
+  { run_id: z.string().optional().describe('Specific run ID to query. Omit for current active run.') },
+  async (args) => {
+    const result = await queryKernel('run_status', args.run_id ? { runId: args.run_id } : {});
+    return { content: [{ type: 'text' as const, text: result }] };
+  },
+);
+
+server.tool(
+  'demarch_sprint_phase',
+  'Get the current phase of the active sprint (e.g., brainstorm, strategize, plan, execute, ship, reflect).',
+  {},
+  async () => {
+    const result = await queryKernel('sprint_phase', {});
+    return { content: [{ type: 'text' as const, text: result }] };
+  },
+);
+
+server.tool(
+  'demarch_search_beads',
+  'Search work items (beads) in the Demarch issue tracker. Returns JSON array of matching issues.',
+  {
+    id: z.string().optional().describe('Specific bead ID to look up (e.g., "beads-abc123")'),
+    query: z.string().optional().describe('Search keyword to filter beads'),
+    status: z.string().optional().describe('Filter by status: open, in_progress, closed'),
+  },
+  async (args) => {
+    const params: Record<string, unknown> = {};
+    if (args.id) params.id = args.id;
+    if (args.query) params.query = args.query;
+    if (args.status) params.status = args.status;
+    const result = await queryKernel('search_beads', params);
+    return { content: [{ type: 'text' as const, text: result }] };
+  },
+);
+
+server.tool(
+  'demarch_spec_lookup',
+  'Look up spec artifacts (PRDs, requirements, designs) from the active run.',
+  { artifact_id: z.string().optional().describe('Specific artifact ID. Omit to list all artifacts.') },
+  async (args) => {
+    const result = await queryKernel('spec_lookup', args.artifact_id ? { artifactId: args.artifact_id } : {});
+    return { content: [{ type: 'text' as const, text: result }] };
+  },
+);
+
+server.tool(
+  'demarch_review_summary',
+  'Get the latest code review summary/verdict from the Demarch review engine.',
+  {},
+  async () => {
+    const result = await queryKernel('review_summary', {});
+    return { content: [{ type: 'text' as const, text: result }] };
+  },
+);
+
+server.tool(
+  'demarch_next_work',
+  'Get prioritized recommendations for what to work on next. Returns ready (unblocked) work items.',
+  {},
+  async () => {
+    const result = await queryKernel('next_work', {});
+    return { content: [{ type: 'text' as const, text: result }] };
+  },
+);
+
+server.tool(
+  'demarch_run_events',
+  'Query recent kernel events (phase transitions, dispatches, state changes).',
+  {
+    limit: z.number().optional().describe('Maximum number of events to return (default: 20)'),
+    since: z.string().optional().describe('ISO timestamp — only return events after this time'),
+  },
+  async (args) => {
+    const params: Record<string, unknown> = {};
+    if (args.limit) params.limit = args.limit;
+    if (args.since) params.since = args.since;
+    const result = await queryKernel('run_events', params);
+    return { content: [{ type: 'text' as const, text: result }] };
   },
 );
 
