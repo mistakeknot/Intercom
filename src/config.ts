@@ -8,6 +8,7 @@ import { readEnvFile } from './env.js';
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
+  'NANOCLAW_RUNTIME',
   'TELEGRAM_BOT_TOKEN',
   'TELEGRAM_ONLY',
 ]);
@@ -39,7 +40,7 @@ export const MAIN_GROUP_FOLDER = 'main';
 export type Runtime = 'claude' | 'gemini' | 'codex';
 
 export const DEFAULT_RUNTIME: Runtime =
-  (process.env.NANOCLAW_RUNTIME as Runtime) || 'claude';
+  (process.env.NANOCLAW_RUNTIME as Runtime) || (envConfig.NANOCLAW_RUNTIME as Runtime) || 'claude';
 
 export const CONTAINER_IMAGES: Record<Runtime, string> = {
   claude: process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest',

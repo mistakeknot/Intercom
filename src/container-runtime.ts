@@ -45,7 +45,7 @@ export function ensureContainerRuntimeRunning(): void {
       '║  2. Run: docker info                                           ║',
     );
     console.error(
-      '║  3. Restart NanoClaw                                           ║',
+      '║  3. Restart Intercom                                           ║',
     );
     console.error(
       '╚════════════════════════════════════════════════════════════════╝\n',

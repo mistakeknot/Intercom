@@ -1,7 +1,7 @@
 {
-  "name": "nanoclaw",
+  "name": "intercom",
   "version": "1.0.0",
-  "description": "Personal Claude assistant. Lightweight, secure, customizable.",
+  "description": "Multi-runtime personal AI assistant with container isolation.",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {

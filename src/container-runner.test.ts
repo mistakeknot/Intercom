@@ -8,10 +8,16 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
 // Mock config
 vi.mock('./config.js', () => ({
+  CONTAINER_IMAGES: {
+    claude: 'nanoclaw-agent:latest',
+    gemini: 'nanoclaw-agent-gemini:latest',
+    codex: 'nanoclaw-agent-codex:latest',
+  },
   CONTAINER_IMAGE: 'nanoclaw-agent:latest',
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
   CONTAINER_TIMEOUT: 1800000, // 30min
   DATA_DIR: '/tmp/nanoclaw-test-data',
+  DEFAULT_RUNTIME: 'claude',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
 }));
