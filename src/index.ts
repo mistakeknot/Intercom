@@ -4,9 +4,11 @@ import path from 'path';
 import {
   ASSISTANT_NAME,
   DATA_DIR,
+  DEFAULT_RUNTIME,
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
+  Runtime,
   TELEGRAM_BOT_TOKEN,
   TELEGRAM_ONLY,
   TRIGGER_PATTERN,
@@ -21,6 +23,7 @@ import {
 } from './container-runner.js';
 import { cleanupOrphans, ensureContainerRuntimeRunning } from './container-runtime.js';
 import {
+  deleteSession,
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
@@ -39,7 +42,7 @@ import { GroupQueue } from './group-queue.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import { Channel, CommandResult, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -301,7 +304,7 @@ async function startMessageLoop(): Promise<void> {
   }
   messageLoopRunning = true;
 
-  logger.info(`NanoClaw running (trigger: @${ASSISTANT_NAME})`);
+  logger.info(`Intercom running (trigger: @${ASSISTANT_NAME})`);
 
   while (true) {
     try {
@@ -401,6 +404,158 @@ function recoverPendingMessages(): void {
   }
 }
 
+// --- Slash command handlers ---
+
+const startedAt = Date.now();
+const VALID_RUNTIMES: Runtime[] = ['claude', 'gemini', 'codex'];
+
+function clearGroupSession(groupFolder: string): void {
+  // Remove from SQLite
+  deleteSession(groupFolder);
+  // Remove from in-memory cache
+  delete sessions[groupFolder];
+  // Remove .sessions/*.json files (Agent SDK session state)
+  const sessionsDir = path.join(DATA_DIR, '..', 'groups', groupFolder, '.sessions');
+  try {
+    const files = fs.readdirSync(sessionsDir);
+    for (const f of files) {
+      if (f.endsWith('.json')) {
+        fs.unlinkSync(path.join(sessionsDir, f));
+      }
+    }
+  } catch {
+    // Directory may not exist — that's fine
+  }
+}
+
+function handleHelp(): CommandResult {
+  return {
+    text: [
+      `*${ASSISTANT_NAME} Commands*`,
+      '',
+      '/help — Show this command list',
+      '/status — Show runtime, session, and container status',
+      '/model — Show current runtime and available options',
+      '/model <name> — Switch runtime (claude, gemini, codex)',
+      '/reset — Clear session and stop running container',
+      '/ping — Check if bot is online',
+      '/chatid — Show this chat\'s registration ID',
+    ].join('\n'),
+    parseMode: 'Markdown',
+  };
+}
+
+function handleStatus(chatJid: string): CommandResult {
+  const group = registeredGroups[chatJid];
+  if (!group) {
+    return { text: 'This chat is not registered.' };
+  }
+
+  const runtime = group.runtime || DEFAULT_RUNTIME;
+  const sessionId = sessions[group.folder];
+  const active = queue.isActive(chatJid);
+  const uptimeMs = Date.now() - startedAt;
+  const uptimeMin = Math.floor(uptimeMs / 60000);
+  const uptimeHr = Math.floor(uptimeMin / 60);
+  const uptime = uptimeHr > 0
+    ? `${uptimeHr}h ${uptimeMin % 60}m`
+    : `${uptimeMin}m`;
+
+  const lines = [
+    `*Status for ${group.name}*`,
+    '',
+    `Runtime: \`${runtime}\``,
+    `Session: ${sessionId ? `\`${sessionId.slice(0, 12)}...\`` : '_none_'}`,
+    `Container: ${active ? 'active' : 'idle'}`,
+    `Assistant: ${ASSISTANT_NAME}`,
+    `Uptime: ${uptime}`,
+  ];
+
+  return { text: lines.join('\n'), parseMode: 'Markdown' };
+}
+
+function handleModel(chatJid: string, args: string): CommandResult {
+  const group = registeredGroups[chatJid];
+  if (!group) {
+    return { text: 'This chat is not registered.' };
+  }
+
+  const currentRuntime = group.runtime || DEFAULT_RUNTIME;
+
+  // No args — show current runtime and options
+  if (!args) {
+    return {
+      text: [
+        `Current runtime: \`${currentRuntime}\``,
+        `Available: ${VALID_RUNTIMES.map(r => r === currentRuntime ? `*${r}*` : r).join(', ')}`,
+        '',
+        'Usage: `/model <runtime>`',
+      ].join('\n'),
+      parseMode: 'Markdown',
+    };
+  }
+
+  const newRuntime = args.toLowerCase() as Runtime;
+  if (!VALID_RUNTIMES.includes(newRuntime)) {
+    return {
+      text: `Unknown runtime: \`${args}\`\nAvailable: ${VALID_RUNTIMES.join(', ')}`,
+      parseMode: 'Markdown',
+    };
+  }
+
+  if (newRuntime === currentRuntime) {
+    return { text: `Already using \`${currentRuntime}\`.`, parseMode: 'Markdown' };
+  }
+
+  // Kill running container, clear session, update runtime
+  queue.killGroup(chatJid);
+  clearGroupSession(group.folder);
+  group.runtime = newRuntime;
+  registeredGroups[chatJid] = group;
+  setRegisteredGroup(chatJid, group);
+
+  return {
+    text: `Switched from \`${currentRuntime}\` to \`${newRuntime}\`. Session cleared.`,
+    parseMode: 'Markdown',
+  };
+}
+
+function handleReset(chatJid: string): CommandResult {
+  const group = registeredGroups[chatJid];
+  if (!group) {
+    return { text: 'This chat is not registered.' };
+  }
+
+  const wasActive = queue.isActive(chatJid);
+  queue.killGroup(chatJid);
+  clearGroupSession(group.folder);
+
+  const parts = ['Session cleared.'];
+  if (wasActive) parts.push('Running container stopped.');
+  parts.push('Next message will start a fresh session.');
+
+  return { text: parts.join(' ') };
+}
+
+async function handleCommand(
+  chatJid: string,
+  command: string,
+  args: string,
+): Promise<CommandResult> {
+  switch (command) {
+    case 'help':
+      return handleHelp();
+    case 'status':
+      return handleStatus(chatJid);
+    case 'model':
+      return handleModel(chatJid, args);
+    case 'reset':
+      return handleReset(chatJid);
+    default:
+      return { text: `Unknown command: /${command}` };
+  }
+}
+
 function ensureContainerSystemRunning(): void {
   ensureContainerRuntimeRunning();
   cleanupOrphans();
@@ -427,6 +582,7 @@ async function main(): Promise<void> {
     onMessage: (_chatJid: string, msg: NewMessage) => storeMessage(msg),
     onChatMetadata: (chatJid: string, timestamp: string, name?: string, channel?: string, isGroup?: boolean) =>
       storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
+    onCommand: handleCommand,
     registeredGroups: () => registeredGroups,
   };
 
@@ -483,7 +639,7 @@ const isDirectRun =
 
 if (isDirectRun) {
   main().catch((err) => {
-    logger.error({ err }, 'Failed to start NanoClaw');
+    logger.error({ err }, 'Failed to start Intercom');
     process.exit(1);
   });
 }

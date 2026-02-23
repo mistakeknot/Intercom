@@ -77,6 +77,19 @@ export interface TaskRunLog {
   error: string | null;
 }
 
+// --- Slash command abstraction ---
+
+export interface CommandResult {
+  text: string;
+  parseMode?: 'Markdown' | 'HTML';
+}
+
+export type OnCommand = (
+  chatJid: string,
+  command: string,
+  args: string,
+) => Promise<CommandResult>;
+
 // --- Channel abstraction ---
 
 export interface Channel {

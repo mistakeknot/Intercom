@@ -5,6 +5,7 @@ import { logger } from '../logger.js';
 import {
   Channel,
   OnChatMetadata,
+  OnCommand,
   OnInboundMessage,
   RegisteredGroup,
 } from '../types.js';
@@ -12,6 +13,7 @@ import {
 export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
+  onCommand?: OnCommand;
   registeredGroups: () => Record<string, RegisteredGroup>;
 }
 
@@ -49,6 +51,27 @@ export class TelegramChannel implements Channel {
     this.bot.command('ping', (ctx) => {
       ctx.reply(`${ASSISTANT_NAME} is online.`);
     });
+
+    // Slash commands delegated to the orchestrator
+    if (this.opts.onCommand) {
+      const onCommand = this.opts.onCommand;
+
+      for (const cmd of ['help', 'model', 'reset', 'status']) {
+        this.bot.command(cmd, async (ctx) => {
+          const chatJid = `tg:${ctx.chat.id}`;
+          const args = (ctx.match as string) || '';
+          try {
+            const result = await onCommand(chatJid, cmd, args.trim());
+            await ctx.reply(result.text, {
+              parse_mode: result.parseMode || 'Markdown',
+            });
+          } catch (err) {
+            logger.error({ cmd, chatJid, err }, 'Command handler error');
+            await ctx.reply('Command failed. Check logs for details.');
+          }
+        });
+      }
+    }
 
     this.bot.on('message:text', async (ctx) => {
       // Skip commands
@@ -168,6 +191,16 @@ export class TelegramChannel implements Channel {
     this.bot.catch((err) => {
       logger.error({ err: err.message }, 'Telegram bot error');
     });
+
+    // Register command menu in Telegram autocomplete
+    await this.bot.api.setMyCommands([
+      { command: 'help', description: 'Show available commands' },
+      { command: 'model', description: 'Show or switch runtime (claude/gemini/codex)' },
+      { command: 'reset', description: 'Clear session and stop container' },
+      { command: 'status', description: 'Show runtime, session, and container status' },
+      { command: 'ping', description: 'Check if bot is online' },
+      { command: 'chatid', description: "Show this chat's registration ID" },
+    ]);
 
     // Start polling — returns a Promise that resolves when started
     return new Promise<void>((resolve) => {

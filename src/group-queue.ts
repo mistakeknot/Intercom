@@ -1,8 +1,9 @@
-import { ChildProcess } from 'child_process';
+import { ChildProcess, execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR, MAX_CONCURRENT_CONTAINERS } from './config.js';
+import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
 import { logger } from './logger.js';
 
 interface QueuedTask {
@@ -154,6 +155,27 @@ export class GroupQueue {
       fs.writeFileSync(path.join(inputDir, '_close'), '');
     } catch {
       // ignore
+    }
+  }
+
+  isActive(groupJid: string): boolean {
+    const state = this.groups.get(groupJid);
+    return state?.active ?? false;
+  }
+
+  killGroup(groupJid: string): boolean {
+    const state = this.groups.get(groupJid);
+    if (!state?.active || !state.containerName) return false;
+
+    try {
+      execFileSync(CONTAINER_RUNTIME_BIN, ['stop', state.containerName], {
+        timeout: 10000,
+      });
+      logger.info({ groupJid, container: state.containerName }, 'Container stopped via killGroup');
+      return true;
+    } catch (err) {
+      logger.warn({ groupJid, container: state.containerName, err }, 'Failed to stop container');
+      return false;
     }
   }
 
