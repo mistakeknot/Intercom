@@ -55,6 +55,7 @@ interface SDKUserMessage {
   session_id: string;
 }
 
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-opus-4-6';
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
@@ -417,6 +418,7 @@ async function runQuery(
   for await (const message of query({
     prompt: stream,
     options: {
+      model: CLAUDE_MODEL,
       cwd: '/workspace/group',
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
@@ -536,8 +538,7 @@ async function main(): Promise<void> {
   }
 
   // Announce model to host
-  const claudeModel = process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514';
-  writeOutput({ status: 'success', result: null, model: claudeModel });
+  writeOutput({ status: 'success', result: null, model: CLAUDE_MODEL });
 
   // Query loop: run query → wait for IPC message → run new query → repeat
   let resumeAt: string | undefined;

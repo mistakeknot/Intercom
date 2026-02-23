@@ -414,7 +414,7 @@ const startedAt = Date.now();
 const VALID_RUNTIMES: Runtime[] = ['claude', 'gemini', 'codex'];
 
 const RUNTIME_DISPLAY_NAMES: Record<Runtime, string> = {
-  claude: 'Claude (Sonnet)',
+  claude: 'Claude Opus 4.6',
   gemini: 'Gemini 3.1 Pro',
   codex: 'GPT-5.1 Codex',
 };
