@@ -32,6 +32,15 @@ Container images: `nanoclaw-agent:latest`, `nanoclaw-agent-gemini:latest`, `nano
 
 All runtimes share the same stdin/stdout IPC protocol (OUTPUT markers), tool set, and session management.
 
+## Skills
+
+| Skill | When to Use |
+|-------|-------------|
+| `/setup` | First-time installation, authentication, service configuration |
+| `/customize` | Adding channels, integrations, changing behavior |
+| `/debug` | Container issues, logs, troubleshooting |
+| `/update` | Pull upstream NanoClaw changes, merge with customizations, run migrations |
+
 ## Development
 
 ```bash
@@ -42,6 +51,13 @@ cd container && bash build.sh latest gemini # Build single runtime
 ```
 
 Runner source is mounted from host into container and recompiled on startup, so code changes take effect without rebuilding images.
+
+Service management:
+```bash
+systemctl --user start intercom
+systemctl --user stop intercom
+systemctl --user restart intercom
+```
 
 ## Container Build Cache
 

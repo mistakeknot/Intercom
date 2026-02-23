@@ -20,6 +20,7 @@ vi.mock('./config.js', () => ({
   DEFAULT_RUNTIME: 'claude',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
+  TIMEZONE: 'America/Los_Angeles',
 }));
 
 // Mock logger
