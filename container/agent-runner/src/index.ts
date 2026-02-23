@@ -33,6 +33,7 @@ interface ContainerOutput {
   status: 'success' | 'error';
   result: string | null;
   newSessionId?: string;
+  model?: string;
   error?: string;
 }
 
@@ -533,6 +534,10 @@ async function main(): Promise<void> {
     log(`Draining ${pending.length} pending IPC messages into initial prompt`);
     prompt += '\n' + pending.join('\n');
   }
+
+  // Announce model to host
+  const claudeModel = process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514';
+  writeOutput({ status: 'success', result: null, model: claudeModel });
 
   // Query loop: run query → wait for IPC message → run new query → repeat
   let resumeAt: string | undefined;

@@ -177,6 +177,9 @@ async function main(): Promise<void> {
     prompt += '\n' + pending.join('\n');
   }
 
+  // Announce model to host
+  writeOutput({ status: 'success', result: null, model: MODEL });
+
   // Query loop
   try {
     while (true) {

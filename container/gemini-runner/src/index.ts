@@ -42,6 +42,7 @@ const MAX_TOOL_ROUNDS = 50;
 interface ContentPart {
   text?: string;
   thought?: boolean;
+  thoughtSignature?: string;
   functionCall?: { name: string; args?: Record<string, unknown> };
   functionResponse?: { name: string; response: unknown };
 }
@@ -255,11 +256,9 @@ async function runQuery(
     const textParts = parts.filter(p => p.text && !p.thought);
 
     if (functionCalls.length > 0) {
-      // Model wants to call tools — add model's response to history
-      const modelParts: ContentPart[] = functionCalls.map(p => ({
-        functionCall: p.functionCall,
-      }));
-      contents.push({ role: 'model', parts: modelParts });
+      // Model wants to call tools — add FULL model response to history
+      // (preserves thoughtSignature, thought parts, etc. required by Gemini 3+)
+      contents.push({ role: 'model', parts: [...parts] });
 
       // Execute all function calls
       const responseParts: ContentPart[] = await Promise.all(functionCalls.map(async (p) => {
@@ -381,6 +380,9 @@ async function main(): Promise<void> {
     log(`Draining ${pending.length} pending IPC messages into initial prompt`);
     prompt += '\n' + pending.join('\n');
   }
+
+  // Announce model to host
+  writeOutput({ status: 'success', result: null, model: MODEL });
 
   // Query loop
   try {

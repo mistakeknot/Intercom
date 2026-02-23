@@ -52,6 +52,7 @@ let lastTimestamp = '';
 let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
+let reportedModels: Record<string, string> = {}; // groupFolder → model name from container
 let messageLoopRunning = false;
 
 let whatsapp: WhatsAppChannel;
@@ -252,12 +253,15 @@ async function runAgent(
     new Set(Object.keys(registeredGroups)),
   );
 
-  // Wrap onOutput to track session ID from streamed results
+  // Wrap onOutput to track session ID and model from streamed results
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
         if (output.newSessionId) {
           sessions[group.folder] = output.newSessionId;
           setSession(group.folder, output.newSessionId);
+        }
+        if (output.model) {
+          reportedModels[group.folder] = output.model;
         }
         await onOutput(output);
       }
@@ -409,6 +413,16 @@ function recoverPendingMessages(): void {
 const startedAt = Date.now();
 const VALID_RUNTIMES: Runtime[] = ['claude', 'gemini', 'codex'];
 
+const RUNTIME_FALLBACK_MODELS: Record<Runtime, string> = {
+  claude: 'claude',
+  gemini: 'gemini',
+  codex: 'codex',
+};
+
+function getModelName(groupFolder: string, runtime: Runtime): string {
+  return reportedModels[groupFolder] || RUNTIME_FALLBACK_MODELS[runtime];
+}
+
 function clearGroupSession(groupFolder: string): void {
   // Remove from SQLite
   deleteSession(groupFolder);
@@ -464,7 +478,7 @@ function handleStatus(chatJid: string): CommandResult {
   const lines = [
     `*Status for ${group.name}*`,
     '',
-    `Runtime: \`${runtime}\``,
+    `Model: \`${getModelName(group.folder, runtime)}\``,
     `Session: ${sessionId ? `\`${sessionId.slice(0, 12)}...\`` : '_none_'}`,
     `Container: ${active ? 'active' : 'idle'}`,
     `Assistant: ${ASSISTANT_NAME}`,
@@ -482,14 +496,22 @@ function handleModel(chatJid: string, args: string): CommandResult {
 
   const currentRuntime = group.runtime || DEFAULT_RUNTIME;
 
-  // No args — show current runtime and options
+  // No args — show current model and available runtimes
   if (!args) {
+    const currentModel = getModelName(group.folder, currentRuntime);
+    const runtimeList = VALID_RUNTIMES.map(r => {
+      const marker = r === currentRuntime ? ` — \`${currentModel}\` (active)` : '';
+      return `  \`${r}\`${marker}`;
+    }).join('\n');
+
     return {
       text: [
-        `Current runtime: \`${currentRuntime}\``,
-        `Available: ${VALID_RUNTIMES.map(r => r === currentRuntime ? `*${r}*` : r).join(', ')}`,
+        `*Current model:* \`${currentModel}\``,
+        `*Runtime:* \`${currentRuntime}\``,
         '',
-        'Usage: `/model <runtime>`',
+        runtimeList,
+        '',
+        'Switch: `/model <runtime>`',
       ].join('\n'),
       parseMode: 'Markdown',
     };
@@ -513,6 +535,9 @@ function handleModel(chatJid: string, args: string): CommandResult {
   group.runtime = newRuntime;
   registeredGroups[chatJid] = group;
   setRegisteredGroup(chatJid, group);
+
+  // Clear stale model name — next container run will report the new one
+  delete reportedModels[group.folder];
 
   return {
     text: `Switched from \`${currentRuntime}\` to \`${newRuntime}\`. Session cleared.`,

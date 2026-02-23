@@ -18,6 +18,7 @@ export interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  model?: string;
 }
 
 export const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
