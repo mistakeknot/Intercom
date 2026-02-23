@@ -413,14 +413,14 @@ function recoverPendingMessages(): void {
 const startedAt = Date.now();
 const VALID_RUNTIMES: Runtime[] = ['claude', 'gemini', 'codex'];
 
-const RUNTIME_FALLBACK_MODELS: Record<Runtime, string> = {
-  claude: 'claude',
-  gemini: 'gemini',
-  codex: 'codex',
+const RUNTIME_DISPLAY_NAMES: Record<Runtime, string> = {
+  claude: 'Claude (Sonnet)',
+  gemini: 'Gemini 3.1 Pro',
+  codex: 'GPT-5.1 Codex',
 };
 
 function getModelName(groupFolder: string, runtime: Runtime): string {
-  return reportedModels[groupFolder] || RUNTIME_FALLBACK_MODELS[runtime];
+  return reportedModels[groupFolder] || RUNTIME_DISPLAY_NAMES[runtime];
 }
 
 function clearGroupSession(groupFolder: string): void {
@@ -500,13 +500,14 @@ function handleModel(chatJid: string, args: string): CommandResult {
   if (!args) {
     const currentModel = getModelName(group.folder, currentRuntime);
     const runtimeList = VALID_RUNTIMES.map(r => {
-      const marker = r === currentRuntime ? ` — \`${currentModel}\` (active)` : '';
-      return `  \`${r}\`${marker}`;
+      const active = r === currentRuntime;
+      const display = active ? currentModel : RUNTIME_DISPLAY_NAMES[r];
+      return `  \`${r}\` — ${display}${active ? ' (active)' : ''}`;
     }).join('\n');
 
     return {
       text: [
-        `*Current model:* \`${currentModel}\``,
+        `*Current model:* ${currentModel}`,
         `*Runtime:* \`${currentRuntime}\``,
         '',
         runtimeList,
