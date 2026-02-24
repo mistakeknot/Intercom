@@ -1,5 +1,5 @@
 /**
- * NanoClaw Codex Agent Runner
+ * Intercom Codex Agent Runner
  * Runs inside a container, receives config via stdin, outputs result to stdout.
  * Wraps `codex exec` CLI for non-interactive agent execution.
  *
@@ -26,7 +26,7 @@ import {
 } from '../../shared/ipc-input.js';
 import { archiveConversation, type ParsedMessage } from '../../shared/session-base.js';
 
-const MODEL = 'gpt-5.1-codex';
+let MODEL = 'gpt-5.1-codex';
 
 function generateSessionId(): string {
   return `codex-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -111,6 +111,10 @@ async function main(): Promise<void> {
     containerInput = JSON.parse(stdinData);
     try { fs.unlinkSync('/tmp/input.json'); } catch { /* may not exist */ }
     log(`Received input for group: ${containerInput.groupFolder}`);
+    if (containerInput.model) {
+      MODEL = containerInput.model;
+      log(`Using model from host: ${MODEL}`);
+    }
   } catch (err) {
     writeOutput({
       status: 'error',

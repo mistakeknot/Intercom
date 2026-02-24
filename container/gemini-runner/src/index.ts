@@ -1,5 +1,5 @@
 /**
- * NanoClaw Gemini Agent Runner
+ * Intercom Gemini Agent Runner
  * Runs inside a container, receives config via stdin, outputs result to stdout.
  * Uses Google's Code Assist API (cloudcode-pa.googleapis.com) with OAuth.
  *
@@ -34,7 +34,13 @@ import {
 import { archiveConversation, type ParsedMessage } from '../../shared/session-base.js';
 
 const CODE_ASSIST_ENDPOINT = 'https://cloudcode-pa.googleapis.com/v1internal';
-const MODEL = 'gemini-3.1-pro-preview';
+// Map catalog IDs to Code Assist API model strings
+const GEMINI_API_MODELS: Record<string, string> = {
+  'gemini-3.1-pro': 'gemini-3.1-pro-preview',
+  'gemini-2.5-flash': 'gemini-2.5-flash-preview',
+};
+
+let MODEL = 'gemini-3.1-pro-preview';
 const MAX_TOOL_ROUNDS = 50;
 
 // --- Code Assist API types ---
@@ -91,6 +97,10 @@ interface SessionData {
   contents: Content[];
   systemInstruction: string;
   projectId: string;
+}
+
+function truncate(s: string, max: number): string {
+  return s.length <= max ? s : s.slice(0, max) + '...';
 }
 
 // --- Session management ---
@@ -260,6 +270,19 @@ async function runQuery(
       // (preserves thoughtSignature, thought parts, etc. required by Gemini 3+)
       contents.push({ role: 'model', parts: [...parts] });
 
+      // Emit tool_start events for streaming visibility
+      for (const p of functionCalls) {
+        writeOutput({
+          status: 'success',
+          result: null,
+          event: {
+            type: 'tool_start',
+            toolName: p.functionCall?.name || 'unknown',
+            toolInput: truncate(JSON.stringify(p.functionCall?.args || {}), 200),
+          },
+        });
+      }
+
       // Execute all function calls
       const responseParts: ContentPart[] = await Promise.all(functionCalls.map(async (p) => {
         const name = p.functionCall?.name || 'unknown';
@@ -304,6 +327,10 @@ async function main(): Promise<void> {
     containerInput = JSON.parse(stdinData);
     try { fs.unlinkSync('/tmp/input.json'); } catch { /* may not exist */ }
     log(`Received input for group: ${containerInput.groupFolder}`);
+    if (containerInput.model) {
+      MODEL = GEMINI_API_MODELS[containerInput.model] || containerInput.model;
+      log(`Using model from host: ${MODEL}`);
+    }
   } catch (err) {
     writeOutput({
       status: 'error',

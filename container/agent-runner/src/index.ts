@@ -1,5 +1,5 @@
 /**
- * NanoClaw Agent Runner
+ * Intercom Agent Runner
  * Runs inside a container, receives config via stdin, outputs result to stdout
  *
  * Input protocol:
@@ -27,7 +27,15 @@ interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  model?: string;
   secrets?: Record<string, string>;
+}
+
+interface StreamEvent {
+  type: 'tool_start' | 'text_delta';
+  toolName?: string;
+  toolInput?: string;
+  text?: string;
 }
 
 interface ContainerOutput {
@@ -36,6 +44,7 @@ interface ContainerOutput {
   newSessionId?: string;
   model?: string;
   error?: string;
+  event?: StreamEvent;
 }
 
 interface SessionEntry {
@@ -56,7 +65,7 @@ interface SDKUserMessage {
   session_id: string;
 }
 
-const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-opus-4-6';
+let CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-opus-4-6';
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
@@ -114,6 +123,10 @@ function writeOutput(output: ContainerOutput): void {
   console.log(OUTPUT_START_MARKER);
   console.log(JSON.stringify(output));
   console.log(OUTPUT_END_MARKER);
+}
+
+function truncate(s: string, max: number): string {
+  return s.length <= max ? s : s.slice(0, max) + '...';
 }
 
 function log(message: string): void {
@@ -464,6 +477,30 @@ async function runQuery(
 
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;
+
+      // Emit streaming events for tool calls and text blocks
+      const content = (message as any).message?.content;
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (block.type === 'tool_use') {
+            writeOutput({
+              status: 'success',
+              result: null,
+              event: {
+                type: 'tool_start',
+                toolName: block.name,
+                toolInput: truncate(JSON.stringify(block.input), 200),
+              },
+            });
+          } else if (block.type === 'text' && block.text) {
+            writeOutput({
+              status: 'success',
+              result: null,
+              event: { type: 'text_delta', text: block.text },
+            });
+          }
+        }
+      }
     }
 
     if (message.type === 'system' && message.subtype === 'init') {
@@ -502,6 +539,10 @@ async function main(): Promise<void> {
     // Delete the temp file the entrypoint wrote — it contains secrets
     try { fs.unlinkSync('/tmp/input.json'); } catch { /* may not exist */ }
     log(`Received input for group: ${containerInput.groupFolder}`);
+    if (containerInput.model) {
+      CLAUDE_MODEL = containerInput.model;
+      log(`Using model from host: ${CLAUDE_MODEL}`);
+    }
   } catch (err) {
     writeOutput({
       status: 'error',
