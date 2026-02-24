@@ -205,6 +205,8 @@ cd container && bash build.sh latest all  # Build all container images
 cd container && bash build.sh latest gemini  # Build single runtime
 ```
 
+**Always restart the service after building:** `systemctl --user restart intercom`. The compiled JS in `dist/` is only loaded at process startup — a build without a restart means the running service still uses the old code.
+
 ### Hot Reload
 
 Runner source code is bind-mounted from host into the container and recompiled on startup. This means you can edit `container/gemini-runner/src/*.ts` or `container/shared/*.ts` and the changes take effect on the next container spawn without rebuilding Docker images.
