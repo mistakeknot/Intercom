@@ -110,6 +110,15 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
+  // Add model column to registered_groups if it doesn't exist (migration for existing DBs)
+  try {
+    database.exec(
+      `ALTER TABLE registered_groups ADD COLUMN model TEXT`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
   // Add channel and is_group columns if they don't exist (migration for existing DBs)
   try {
     database.exec(
@@ -287,6 +296,29 @@ export function storeMessageDirect(msg: {
     msg.is_from_me ? 1 : 0,
     msg.is_bot_message ? 1 : 0,
   );
+}
+
+/**
+ * Get recent conversation messages (both user and bot) for a chat.
+ * Used to build context for session continuity after model switches.
+ */
+export function getRecentConversation(
+  chatJid: string,
+  limit: number,
+): { sender_name: string; content: string; timestamp: string; is_bot_message: boolean }[] {
+  const rows = db.prepare(`
+    SELECT sender_name, content, timestamp, is_bot_message
+    FROM messages
+    WHERE chat_jid = ? AND content != '' AND content IS NOT NULL
+    ORDER BY timestamp DESC
+    LIMIT ?
+  `).all(chatJid, limit) as { sender_name: string; content: string; timestamp: string; is_bot_message: number }[];
+  return rows.reverse().map((r) => ({
+    sender_name: r.sender_name,
+    content: r.content,
+    timestamp: r.timestamp,
+    is_bot_message: r.is_bot_message === 1,
+  }));
 }
 
 export function getNewMessages(
@@ -535,6 +567,7 @@ export function getRegisteredGroup(
         container_config: string | null;
         requires_trigger: number | null;
         runtime: string | null;
+        model: string | null;
       }
     | undefined;
   if (!row) return undefined;
@@ -556,6 +589,7 @@ export function getRegisteredGroup(
       : undefined,
     requiresTrigger: row.requires_trigger === null ? undefined : row.requires_trigger === 1,
     runtime: (row.runtime as RegisteredGroup['runtime']) || undefined,
+    model: row.model || undefined,
   };
 }
 
@@ -567,8 +601,8 @@ export function setRegisteredGroup(
     throw new Error(`Invalid group folder "${group.folder}" for JID ${jid}`);
   }
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, runtime)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, runtime, model)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -578,6 +612,7 @@ export function setRegisteredGroup(
     group.containerConfig ? JSON.stringify(group.containerConfig) : null,
     group.requiresTrigger === undefined ? 1 : group.requiresTrigger ? 1 : 0,
     group.runtime || null,
+    group.model || null,
   );
 }
 
@@ -593,6 +628,7 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     container_config: string | null;
     requires_trigger: number | null;
     runtime: string | null;
+    model: string | null;
   }>;
   const result: Record<string, RegisteredGroup> = {};
   for (const row of rows) {
@@ -613,6 +649,7 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
         : undefined,
       requiresTrigger: row.requires_trigger === null ? undefined : row.requires_trigger === 1,
       runtime: (row.runtime as RegisteredGroup['runtime']) || undefined,
+      model: row.model || undefined,
     };
   }
   return result;

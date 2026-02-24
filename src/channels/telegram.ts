@@ -272,4 +272,34 @@ export class TelegramChannel implements Channel {
       logger.debug({ jid, err }, 'Failed to send Telegram typing indicator');
     }
   }
+
+  async sendMessageWithId(jid: string, text: string): Promise<string | null> {
+    if (!this.bot) return null;
+    try {
+      const numericId = jid.replace(/^tg:/, '');
+      const truncated = text.length > 4096 ? text.slice(0, 4096) : text;
+      const msg = await this.bot.api.sendMessage(numericId, truncated);
+      return msg.message_id.toString();
+    } catch (err) {
+      logger.error({ jid, err }, 'Failed to send Telegram message with ID');
+      return null;
+    }
+  }
+
+  async editMessage(jid: string, messageId: string, text: string): Promise<boolean> {
+    if (!this.bot) return false;
+    try {
+      const numericId = jid.replace(/^tg:/, '');
+      const truncated = text.length > 4096 ? text.slice(0, 4096) : text;
+      await this.bot.api.editMessageText(numericId, parseInt(messageId, 10), truncated);
+      return true;
+    } catch (err: any) {
+      // Telegram returns 400 "message is not modified" if content is identical — silence it
+      if (err?.error_code === 400 && err?.description?.includes('not modified')) {
+        return true;
+      }
+      logger.error({ jid, messageId, err }, 'Failed to edit Telegram message');
+      return false;
+    }
+  }
 }

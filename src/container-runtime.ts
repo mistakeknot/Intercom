@@ -1,5 +1,5 @@
 /**
- * Container runtime abstraction for NanoClaw.
+ * Container runtime abstraction for Intercom.
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
  */
 import { execSync } from 'child_process';
@@ -54,7 +54,7 @@ export function ensureContainerRuntimeRunning(): void {
   }
 }
 
-/** Kill orphaned NanoClaw containers from previous runs. */
+/** Kill orphaned Intercom containers from previous runs. */
 export function cleanupOrphans(): void {
   try {
     const output = execSync(

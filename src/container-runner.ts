@@ -1,9 +1,10 @@
 /**
- * Container Runner for NanoClaw
+ * Container Runner for Intercom
  * Spawns agent execution in containers and handles IPC
  */
 import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
@@ -15,6 +16,7 @@ import {
   GROUPS_DIR,
   IDLE_TIMEOUT,
   TIMEZONE,
+  runtimeForModel,
   type Runtime,
 } from './config.js';
 import { readEnvFile } from './env.js';
@@ -36,7 +38,15 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  model?: string;
   secrets?: Record<string, string>;
+}
+
+export interface StreamEvent {
+  type: 'tool_start' | 'text_delta';
+  toolName?: string;
+  toolInput?: string;
+  text?: string;
 }
 
 export interface ContainerOutput {
@@ -45,6 +55,7 @@ export interface ContainerOutput {
   newSessionId?: string;
   error?: string;
   model?: string;
+  event?: StreamEvent;
 }
 
 interface VolumeMount {
@@ -201,12 +212,36 @@ function buildVolumeMounts(
 }
 
 /**
+ * Read the Claude OAuth token fresh from ~/.claude/.credentials.json.
+ * Claude Code auto-refreshes this file, so we always get a valid token.
+ * Returns the accessToken or undefined if not available.
+ */
+function readClaudeOAuthToken(): string | undefined {
+  const credPath = path.join(os.homedir(), '.claude', '.credentials.json');
+  try {
+    const data = JSON.parse(fs.readFileSync(credPath, 'utf-8'));
+    const token = data?.claudeAiOauth?.accessToken;
+    if (token) {
+      logger.debug('Read Claude OAuth token from credentials file');
+      return token;
+    }
+  } catch {
+    // File doesn't exist or is malformed — fall through
+  }
+  return undefined;
+}
+
+/**
  * Read allowed secrets from .env for passing to the container via stdin.
  * Secrets are never written to disk or mounted as files.
  * All runtime secrets are read — the container uses what it needs.
+ *
+ * For Claude: if neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY
+ * is set in .env, reads the OAuth token from ~/.claude/.credentials.json
+ * (auto-refreshed by Claude Code).
  */
 function readSecrets(): Record<string, string> {
-  return readEnvFile([
+  const secrets = readEnvFile([
     // Claude
     'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY',
     // Gemini (Code Assist API)
@@ -215,6 +250,16 @@ function readSecrets(): Record<string, string> {
     'CODEX_OAUTH_ACCESS_TOKEN', 'CODEX_OAUTH_REFRESH_TOKEN',
     'CODEX_OAUTH_ID_TOKEN', 'CODEX_OAUTH_ACCOUNT_ID',
   ]);
+
+  // Auto-refresh: read Claude OAuth from credentials file if not in .env
+  if (!secrets['CLAUDE_CODE_OAUTH_TOKEN'] && !secrets['ANTHROPIC_API_KEY']) {
+    const token = readClaudeOAuthToken();
+    if (token) {
+      secrets['CLAUDE_CODE_OAUTH_TOKEN'] = token;
+    }
+  }
+
+  return secrets;
 }
 
 function buildContainerArgs(mounts: VolumeMount[], containerName: string, runtime: Runtime): string[] {
@@ -257,7 +302,12 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const runtime: Runtime = group.runtime || DEFAULT_RUNTIME;
+  const runtime: Runtime = group.model
+    ? runtimeForModel(group.model)
+    : group.runtime || DEFAULT_RUNTIME;
+  if (group.model) {
+    input.model = group.model;
+  }
   const mounts = buildVolumeMounts(group, input.isMain, runtime);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;

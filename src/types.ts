@@ -6,7 +6,7 @@ export interface AdditionalMount {
 
 /**
  * Mount Allowlist - Security configuration for additional mounts
- * This file should be stored at ~/.config/nanoclaw/mount-allowlist.json
+ * This file should be stored at ~/.config/intercom/mount-allowlist.json
  * and is NOT mounted into any container, making it tamper-proof from agents.
  */
 export interface MountAllowlist {
@@ -40,6 +40,7 @@ export interface RegisteredGroup {
   containerConfig?: ContainerConfig;
   requiresTrigger?: boolean; // Default: true for groups, false for solo chats
   runtime?: 'claude' | 'gemini' | 'codex'; // Default: uses DEFAULT_RUNTIME from config
+  model?: string; // Model ID from catalog (e.g. 'claude-opus-4-6'). When set, runtime is derived.
 }
 
 export interface NewMessage {
@@ -101,6 +102,9 @@ export interface Channel {
   disconnect(): Promise<void>;
   // Optional: typing indicator. Channels that support it implement it.
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
+  // Optional: message editing for streaming updates. Channels that support it implement both.
+  sendMessageWithId?(jid: string, text: string): Promise<string | null>;
+  editMessage?(jid: string, messageId: string, text: string): Promise<boolean>;
 }
 
 // Callback type that channels use to deliver inbound messages

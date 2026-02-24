@@ -29,7 +29,7 @@ const HOME_DIR = process.env.HOME || os.homedir();
 export const MOUNT_ALLOWLIST_PATH = path.join(
   HOME_DIR,
   '.config',
-  'nanoclaw',
+  'intercom',
   'mount-allowlist.json',
 );
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
@@ -42,6 +42,44 @@ export type Runtime = 'claude' | 'gemini' | 'codex';
 
 export const DEFAULT_RUNTIME: Runtime =
   (process.env.NANOCLAW_RUNTIME as Runtime) || (envConfig.NANOCLAW_RUNTIME as Runtime) || 'claude';
+
+// --- Model catalog ---
+export interface ModelEntry {
+  id: string;           // e.g. 'claude-opus-4-6'
+  runtime: Runtime;     // which container image to use
+  displayName: string;  // e.g. 'Claude Opus 4.6'
+}
+
+export const MODEL_CATALOG: ModelEntry[] = [
+  { id: 'claude-opus-4-6', runtime: 'claude', displayName: 'Claude Opus 4.6' },
+  { id: 'claude-sonnet-4-6', runtime: 'claude', displayName: 'Claude Sonnet 4.6' },
+  { id: 'gemini-3.1-pro', runtime: 'gemini', displayName: 'Gemini 3.1 Pro' },
+  { id: 'gemini-2.5-flash', runtime: 'gemini', displayName: 'Gemini 2.5 Flash' },
+  { id: 'gpt-5.1-codex', runtime: 'codex', displayName: 'GPT-5.1 Codex' },
+];
+
+export const DEFAULT_MODEL = 'claude-opus-4-6';
+
+export function findModel(id: string): ModelEntry | undefined {
+  return MODEL_CATALOG.find(m => m.id === id);
+}
+
+/**
+ * Infer runtime from model ID. Checks the catalog first, then falls back
+ * to prefix-based inference so arbitrary model IDs (e.g. gpt-5.3-codex,
+ * claude-haiku-4-5, gemini-2.5-pro) work without catalog updates.
+ */
+export function runtimeForModel(modelId: string): Runtime {
+  const catalogEntry = findModel(modelId);
+  if (catalogEntry) return catalogEntry.runtime;
+
+  const id = modelId.toLowerCase();
+  if (id.startsWith('claude-')) return 'claude';
+  if (id.startsWith('gemini-')) return 'gemini';
+  if (id.startsWith('gpt-') || id.startsWith('codex-') || id.startsWith('o1-') || id.startsWith('o3-') || id.startsWith('o4-')) return 'codex';
+
+  return DEFAULT_RUNTIME;
+}
 
 export const CONTAINER_IMAGES: Record<Runtime, string> = {
   claude: process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest',

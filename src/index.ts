@@ -4,11 +4,15 @@ import path from 'path';
 import {
   ASSISTANT_NAME,
   DATA_DIR,
+  DEFAULT_MODEL,
   DEFAULT_RUNTIME,
+  findModel,
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
+  MODEL_CATALOG,
   POLL_INTERVAL,
   Runtime,
+  runtimeForModel,
   TELEGRAM_BOT_TOKEN,
   TELEGRAM_ONLY,
   TRIGGER_PATTERN,
@@ -30,6 +34,7 @@ import {
   getAllTasks,
   getMessagesSince,
   getNewMessages,
+  getRecentConversation,
   getRouterState,
   initDatabase,
   setRegisteredGroup,
@@ -37,14 +42,17 @@ import {
   setSession,
   storeChatMetadata,
   storeMessage,
+  storeMessageDirect,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
-import { findChannel, formatMessages, formatOutbound } from './router.js';
+import { findChannel, formatConversationHistory, formatMessages, formatOutbound } from './router.js';
+import { StreamAccumulator } from './stream-accumulator.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, CommandResult, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+import { generateSummary, getCachedSummary, clearCachedSummary } from './summarizer.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -54,6 +62,7 @@ let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let reportedModels: Record<string, string> = {}; // groupFolder → model name from container
+let pendingModelSwitch: Record<string, string> = {}; // chatJid → previous model display name
 let messageLoopRunning = false;
 
 let whatsapp: WhatsAppChannel;
@@ -163,6 +172,40 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const prompt = formatMessages(missedMessages);
 
+  // Model switch context carryover: inject summary + recent messages (or fallback to raw history)
+  let finalPrompt = prompt;
+  if (pendingModelSwitch[chatJid] !== undefined) {
+    const prevModel = pendingModelSwitch[chatJid];
+    delete pendingModelSwitch[chatJid];
+
+    const cached = getCachedSummary(chatJid);
+    if (cached?.summary) {
+      // Summary available — use summary + last 5 raw messages for recency
+      const recentRaw = getRecentConversation(chatJid, 5);
+      const rawBlock = formatConversationHistory(recentRaw, prevModel, ASSISTANT_NAME);
+      finalPrompt = [
+        `<conversation_summary note="Prior conversation with ${prevModel}, summarized.">`,
+        cached.summary,
+        '</conversation_summary>',
+        '',
+        rawBlock,
+        '',
+        prompt,
+      ].filter(Boolean).join('\n');
+      logger.info({ group: group.name, summaryLen: cached.summary.length, recentMessages: recentRaw.length }, 'Injecting summary + recent history after model switch');
+    } else {
+      // Fallback — summary not ready, use raw messages (phase 1 behavior)
+      const history = getRecentConversation(chatJid, 20);
+      const historyBlock = formatConversationHistory(history, prevModel, ASSISTANT_NAME);
+      if (historyBlock) {
+        finalPrompt = historyBlock + '\n\n' + prompt;
+        logger.info({ group: group.name, historyMessages: history.length }, 'Injecting raw history (summary not available)');
+      }
+    }
+
+    clearCachedSummary(chatJid);
+  }
+
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
   const previousCursor = lastAgentTimestamp[chatJid] || '';
@@ -190,15 +233,44 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
-    // Streaming output callback — called for each agent result
+  const accumulator = new StreamAccumulator(channel, chatJid);
+  const useStreaming = accumulator.supportsStreaming;
+
+  const output = await runAgent(group, finalPrompt, chatJid, async (result) => {
+    // Route streaming events to accumulator
+    if (result.event && useStreaming) {
+      if (result.event.type === 'tool_start') {
+        accumulator.addToolStart(result.event.toolName || 'Unknown', result.event.toolInput || '');
+      } else if (result.event.type === 'text_delta' && result.event.text) {
+        accumulator.addTextDelta(result.event.text);
+      }
+      resetIdleTimer();
+      return;
+    }
+
+    // Final result — finalize accumulator or send directly
     if (result.result) {
       const raw = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
-        await channel.sendMessage(chatJid, text);
+        if (useStreaming) {
+          await accumulator.finalize(raw);
+        } else {
+          await channel.sendMessage(chatJid, text);
+        }
+        // Store bot response so conversation history survives model switches
+        storeMessageDirect({
+          id: `bot-${Date.now()}`,
+          chat_jid: chatJid,
+          sender: 'bot',
+          sender_name: ASSISTANT_NAME,
+          content: text,
+          timestamp: new Date().toISOString(),
+          is_from_me: true,
+          is_bot_message: true,
+        });
         outputSentToUser = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
@@ -214,6 +286,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   });
 
+  accumulator.dispose();
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
@@ -429,16 +502,13 @@ function recoverPendingMessages(): void {
 // --- Slash command handlers ---
 
 const startedAt = Date.now();
-const VALID_RUNTIMES: Runtime[] = ['claude', 'gemini', 'codex'];
-
-const RUNTIME_DISPLAY_NAMES: Record<Runtime, string> = {
-  claude: 'Claude Opus 4.6',
-  gemini: 'Gemini 3.1 Pro',
-  codex: 'GPT-5.1 Codex',
-};
-
-function getModelName(groupFolder: string, runtime: Runtime): string {
-  return reportedModels[groupFolder] || RUNTIME_DISPLAY_NAMES[runtime];
+function getModelName(groupFolder: string, modelId?: string): string {
+  if (reportedModels[groupFolder]) return reportedModels[groupFolder];
+  if (modelId) {
+    const entry = findModel(modelId);
+    if (entry) return entry.displayName;
+  }
+  return findModel(DEFAULT_MODEL)?.displayName || DEFAULT_MODEL;
 }
 
 function clearGroupSession(groupFolder: string): void {
@@ -467,9 +537,11 @@ function handleHelp(): CommandResult {
       '',
       '/help — Show this command list',
       '/status — Show runtime, session, and container status',
-      '/model — Show current runtime and available options',
-      '/model <name> — Switch runtime (claude, gemini, codex)',
+      '/model — Show available models',
+      '/model <#> — Switch model by number',
+      '/model <name> — Switch model by name',
       '/reset — Clear session and stop running container',
+      '/new — Start a fresh chat (alias for /reset)',
       '/ping — Check if bot is online',
       '/chatid — Show this chat\'s registration ID',
     ].join('\n'),
@@ -483,7 +555,7 @@ function handleStatus(chatJid: string): CommandResult {
     return { text: 'This chat is not registered.' };
   }
 
-  const runtime = group.runtime || DEFAULT_RUNTIME;
+  const modelId = group.model || DEFAULT_MODEL;
   const sessionId = sessions[group.folder];
   const active = queue.isActive(chatJid);
   const uptimeMs = Date.now() - startedAt;
@@ -496,7 +568,7 @@ function handleStatus(chatJid: string): CommandResult {
   const lines = [
     `*Status for ${group.name}*`,
     '',
-    `Model: \`${getModelName(group.folder, runtime)}\``,
+    `Model: \`${getModelName(group.folder, modelId)}\``,
     `Session: ${sessionId ? `\`${sessionId.slice(0, 12)}...\`` : '_none_'}`,
     `Container: ${active ? 'active' : 'idle'}`,
     `Assistant: ${ASSISTANT_NAME}`,
@@ -512,54 +584,78 @@ function handleModel(chatJid: string, args: string): CommandResult {
     return { text: 'This chat is not registered.' };
   }
 
-  const currentRuntime = group.runtime || DEFAULT_RUNTIME;
+  const currentModelId = group.model || DEFAULT_MODEL;
 
-  // No args — show current model and available runtimes
+  // No args — show numbered catalog
   if (!args) {
-    const currentModel = getModelName(group.folder, currentRuntime);
-    const runtimeList = VALID_RUNTIMES.map(r => {
-      const active = r === currentRuntime;
-      const display = active ? currentModel : RUNTIME_DISPLAY_NAMES[r];
-      return `  \`${r}\` — ${display}${active ? ' (active)' : ''}`;
+    const currentDisplay = getModelName(group.folder, currentModelId);
+    const catalogList = MODEL_CATALOG.map((m, i) => {
+      const active = m.id === currentModelId;
+      return ` ${i + 1}. \`${m.id}\` — ${m.displayName}${active ? ' (active)' : ''}`;
     }).join('\n');
 
     return {
       text: [
-        `*Current model:* ${currentModel}`,
-        `*Runtime:* \`${currentRuntime}\``,
+        `*Current model:* ${currentDisplay}`,
         '',
-        runtimeList,
+        catalogList,
         '',
-        'Switch: `/model <runtime>`',
+        'Switch: `/model <name>` or `/model <#>`',
       ].join('\n'),
       parseMode: 'Markdown',
     };
   }
 
-  const newRuntime = args.toLowerCase() as Runtime;
-  if (!VALID_RUNTIMES.includes(newRuntime)) {
-    return {
-      text: `Unknown runtime: \`${args}\`\nAvailable: ${VALID_RUNTIMES.join(', ')}`,
-      parseMode: 'Markdown',
-    };
+  // Resolve by number or name
+  let newModel = findModel(args.toLowerCase());
+  if (!newModel) {
+    const num = parseInt(args, 10);
+    if (num >= 1 && num <= MODEL_CATALOG.length) {
+      newModel = MODEL_CATALOG[num - 1];
+    }
+  }
+  // Try substring match
+  if (!newModel) {
+    const lower = args.toLowerCase();
+    newModel = MODEL_CATALOG.find(m =>
+      m.id.includes(lower) || m.displayName.toLowerCase().includes(lower),
+    );
   }
 
-  if (newRuntime === currentRuntime) {
-    return { text: `Already using \`${currentRuntime}\`.`, parseMode: 'Markdown' };
+  // Accept arbitrary model IDs — infer runtime from prefix pattern
+  if (!newModel) {
+    const runtime = runtimeForModel(args.toLowerCase());
+    newModel = { id: args.toLowerCase(), runtime, displayName: args };
   }
 
-  // Kill running container, clear session, update runtime
+  if (newModel.id === currentModelId) {
+    return { text: `Already using \`${newModel.displayName}\`.`, parseMode: 'Markdown' };
+  }
+
+  const prevDisplay = getModelName(group.folder, currentModelId);
+
+  // Kill running container, clear session, update model
   queue.killGroup(chatJid);
   clearGroupSession(group.folder);
-  group.runtime = newRuntime;
+  group.model = newModel.id;
+  group.runtime = newModel.runtime;
   registeredGroups[chatJid] = group;
   setRegisteredGroup(chatJid, group);
 
-  // Clear stale model name — next container run will report the new one
+  // Clear stale reported model name — next container run will report the new one
   delete reportedModels[group.folder];
 
+  // Flag for conversation history injection on next message
+  pendingModelSwitch[chatJid] = prevDisplay;
+
+  // Fire-and-forget: pre-generate summary for richer context carryover
+  const history = getRecentConversation(chatJid, 50);
+  if (history.length > 0) {
+    generateSummary(chatJid, history, prevDisplay, ASSISTANT_NAME).catch(() => {});
+  }
+
   return {
-    text: `Switched from \`${currentRuntime}\` to \`${newRuntime}\`. Session cleared.`,
+    text: `Switched from ${prevDisplay} to *${newModel.displayName}*.\nConversation context will carry over.`,
     parseMode: 'Markdown',
   };
 }
@@ -573,6 +669,8 @@ function handleReset(chatJid: string): CommandResult {
   const wasActive = queue.isActive(chatJid);
   queue.killGroup(chatJid);
   clearGroupSession(group.folder);
+  delete pendingModelSwitch[chatJid];
+  clearCachedSummary(chatJid);
 
   const parts = ['Session cleared.'];
   if (wasActive) parts.push('Running container stopped.');
@@ -594,6 +692,7 @@ async function handleCommand(
     case 'model':
       return handleModel(chatJid, args);
     case 'reset':
+    case 'new':
       return handleReset(chatJid);
     default:
       return { text: `Unknown command: /${command}` };

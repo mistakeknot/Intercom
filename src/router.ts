@@ -36,6 +36,27 @@ export function routeOutbound(
   return channel.sendMessage(jid, text);
 }
 
+/**
+ * Format prior conversation messages as an XML preamble for model-switch context injection.
+ * Returns empty string if no messages.
+ */
+export function formatConversationHistory(
+  messages: { sender_name: string; content: string; timestamp: string; is_bot_message: boolean }[],
+  previousModel: string,
+  assistantName: string,
+): string {
+  if (messages.length === 0) return '';
+  const lines = messages.map((m) => {
+    const role = m.is_bot_message ? assistantName : m.sender_name;
+    return `  <message role="${escapeXml(role)}" time="${m.timestamp}">${escapeXml(m.content)}</message>`;
+  });
+  return [
+    `<conversation_history note="Prior conversation with ${escapeXml(previousModel)}. Continue naturally.">`,
+    ...lines,
+    '</conversation_history>',
+  ].join('\n');
+}
+
 export function findChannel(
   channels: Channel[],
   jid: string,
