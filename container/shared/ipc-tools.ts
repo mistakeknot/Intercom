@@ -1,5 +1,5 @@
 /**
- * Shared NanoClaw IPC tool definitions for non-Claude runtimes.
+ * Shared Intercom IPC tool definitions for non-Claude runtimes.
  * These tools allow the agent to send messages, schedule tasks, etc.
  * Same functionality as ipc-mcp-stdio.ts but as plain function calls.
  */

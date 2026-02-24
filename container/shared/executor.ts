@@ -1,5 +1,5 @@
 /**
- * Shared tool executor for NanoClaw non-Claude runtimes.
+ * Shared tool executor for Intercom non-Claude runtimes.
  * Executes shell commands, file operations, grep, and glob.
  *
  * NOTE: These run inside an isolated Docker container with no network access

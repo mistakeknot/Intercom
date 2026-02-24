@@ -1,5 +1,5 @@
 /**
- * Shared IPC input handling for NanoClaw container agents.
+ * Shared IPC input handling for Intercom container agents.
  * Handles polling for follow-up messages and close sentinel.
  */
 

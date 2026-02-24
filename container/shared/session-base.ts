@@ -1,5 +1,5 @@
 /**
- * Shared session archival helpers for NanoClaw container agents.
+ * Shared session archival helpers for Intercom container agents.
  */
 
 import fs from 'fs';

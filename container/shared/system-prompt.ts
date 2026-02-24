@@ -1,5 +1,5 @@
 /**
- * Shared system prompt builder for NanoClaw non-Claude runtimes.
+ * Shared system prompt builder for Intercom non-Claude runtimes.
  * Loads CLAUDE.md files and constructs the system instruction.
  */
 

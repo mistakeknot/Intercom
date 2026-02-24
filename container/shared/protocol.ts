@@ -1,5 +1,5 @@
 /**
- * Shared protocol types and IO helpers for NanoClaw container agents.
+ * Shared protocol types and IO helpers for Intercom container agents.
  * All runtimes (Claude, Gemini, Codex) speak this same protocol.
  */
 
@@ -10,7 +10,15 @@ export interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  model?: string;
   secrets?: Record<string, string>;
+}
+
+export interface StreamEvent {
+  type: 'tool_start' | 'text_delta';
+  toolName?: string;   // for tool_start: 'Bash', 'Read', etc.
+  toolInput?: string;  // for tool_start: truncated input summary
+  text?: string;       // for text_delta: text content
 }
 
 export interface ContainerOutput {
@@ -19,6 +27,7 @@ export interface ContainerOutput {
   newSessionId?: string;
   error?: string;
   model?: string;
+  event?: StreamEvent;
 }
 
 export const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
