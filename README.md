@@ -15,13 +15,13 @@
 
 **New:** First AI assistant to support [Agent Swarms](https://code.claude.com/docs/en/agent-teams). Spin up teams of agents that collaborate in your chat.
 
-## Why NanoClaw Exists
+## Why NanoClaw exists
 
-[OpenClaw](https://github.com/openclaw/openclaw) is an impressive project with a great vision. But running software you don't understand — with access to your life — is a hard sell. OpenClaw has 52+ modules, 8 config management files, 45+ dependencies, and abstractions for 15 channel providers. Security is application-level (allowlists, pairing codes) rather than OS isolation. Everything runs in one Node process with shared memory.
+[OpenClaw](https://github.com/openclaw/openclaw) is an impressive project with a great vision. But running software you don't understand: with access to your life: is a hard sell. OpenClaw has 52+ modules, 8 config management files, 45+ dependencies, and abstractions for 15 channel providers. Security is application-level (allowlists, pairing codes) rather than OS isolation. Everything runs in one Node process with shared memory.
 
 NanoClaw gives you the same core functionality in a codebase you can understand in 8 minutes. One process. A handful of files. Agents run in actual Linux containers with filesystem isolation, not behind permission checks.
 
-## Quick Start
+## Quick start
 
 ```bash
 git clone https://github.com/qwibitai/nanoclaw.git
@@ -47,7 +47,7 @@ Then run `/setup`. Claude Code handles everything: dependencies, authentication,
 
 **Best harness, best model.** NanoClaw runs on Claude Agent SDK, which means you're running Claude Code directly. The harness matters. A bad harness makes even smart models seem dumb, a good harness gives them superpowers. Claude Code is the best harness available.
 
-## What It Supports
+## What it supports
 
 - **WhatsApp I/O** - Message Claude from your phone
 - **Isolated group context** - Each group has its own `CLAUDE.md` memory, isolated filesystem, and runs in its own container sandbox with only that filesystem mounted
@@ -106,7 +106,7 @@ If you want to add Telegram support, don't create a PR that adds Telegram alongs
 
 Users then run `/add-telegram` on their fork and get clean code that does exactly what they need, not a bloated system trying to support every use case.
 
-### RFS (Request for Skills)
+### RFS (Request for skills)
 
 Skills the project would benefit from:
 
