@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  My personal Claude assistant that runs securely in containers. Lightweight and built to be understood and customized for your own needs.
+  A personal Claude assistant that runs securely in containers. Lightweight and built to be understood and customized for your own needs.
 </p>
 
 <p align="center">
@@ -15,9 +15,9 @@
 
 **New:** First AI assistant to support [Agent Swarms](https://code.claude.com/docs/en/agent-teams). Spin up teams of agents that collaborate in your chat.
 
-## Why I Built This
+## Why NanoClaw Exists
 
-[OpenClaw](https://github.com/openclaw/openclaw) is an impressive project with a great vision. But I can't sleep well running software I don't understand with access to my life. OpenClaw has 52+ modules, 8 config management files, 45+ dependencies, and abstractions for 15 channel providers. Security is application-level (allowlists, pairing codes) rather than OS isolation. Everything runs in one Node process with shared memory.
+[OpenClaw](https://github.com/openclaw/openclaw) is an impressive project with a great vision. But running software you don't understand — with access to your life — is a hard sell. OpenClaw has 52+ modules, 8 config management files, 45+ dependencies, and abstractions for 15 channel providers. Security is application-level (allowlists, pairing codes) rather than OS isolation. Everything runs in one Node process with shared memory.
 
 NanoClaw gives you the same core functionality in a codebase you can understand in 8 minutes. One process. A handful of files. Agents run in actual Linux containers with filesystem isolation, not behind permission checks.
 
@@ -37,7 +37,7 @@ Then run `/setup`. Claude Code handles everything: dependencies, authentication,
 
 **Secure by isolation.** Agents run in Linux containers (Apple Container on macOS, or Docker). They can only see what's explicitly mounted. Bash access is safe because commands run inside the container, not on your host.
 
-**Built for one user.** This isn't a framework. It's working software that fits my exact needs. You fork it and have Claude Code make it match your exact needs.
+**Built for one user.** This isn't a framework. It's working software optimized for a single person's needs. Fork it and have Claude Code make it match yours.
 
 **Customization = code changes.** No configuration sprawl. Want different behavior? Modify the code. The codebase is small enough that this is safe.
 
@@ -45,7 +45,7 @@ Then run `/setup`. Claude Code handles everything: dependencies, authentication,
 
 **Skills over features.** Contributors shouldn't add features (e.g. support for Telegram) to the codebase. Instead, they contribute [claude code skills](https://code.claude.com/docs/en/skills) like `/add-telegram` that transform your fork. You end up with clean code that does exactly what you need.
 
-**Best harness, best model.** This runs on Claude Agent SDK, which means you're running Claude Code directly. The harness matters. A bad harness makes even smart models seem dumb, a good harness gives them superpowers. Claude Code is (IMO) the best harness available.
+**Best harness, best model.** NanoClaw runs on Claude Agent SDK, which means you're running Claude Code directly. The harness matters. A bad harness makes even smart models seem dumb, a good harness gives them superpowers. Claude Code is the best harness available.
 
 ## What It Supports
 
@@ -108,7 +108,7 @@ Users then run `/add-telegram` on their fork and get clean code that does exactl
 
 ### RFS (Request for Skills)
 
-Skills we'd like to see:
+Skills the project would benefit from:
 
 **Communication Channels**
 - `/add-slack` - Add Slack
@@ -149,7 +149,7 @@ Key files:
 
 **Why WhatsApp and not Telegram/Signal/etc?**
 
-Because I use WhatsApp. Fork it and run a skill to change it. That's the whole point.
+Because the author uses WhatsApp. Fork it and run a skill to change it. That's the whole point.
 
 **Why Docker?**
 
@@ -165,7 +165,7 @@ Agents run in containers, not behind application-level permission checks. They c
 
 **Why no configuration files?**
 
-We don't want configuration sprawl. Every user should customize it to so that the code matches exactly what they want rather than configuring a generic system. If you like having config files, tell Claude to add them.
+Configuration sprawl is the enemy. Every user should customize it to so that the code matches exactly what they want rather than configuring a generic system. If you like having config files, tell Claude to add them.
 
 **How do I debug issues?**
 
@@ -173,7 +173,7 @@ Ask Claude Code. "Why isn't the scheduler running?" "What's in the recent logs?"
 
 **Why isn't the setup working for me?**
 
-I don't know. Run `claude`, then run `/debug`. If claude finds an issue that is likely affecting other users, open a PR to modify the setup SKILL.md.
+Hard to say without seeing the error. Run `claude`, then run `/debug`. If Claude finds an issue that is likely affecting other users, open a PR to modify the setup SKILL.md.
 
 **What changes will be accepted into the codebase?**
 
