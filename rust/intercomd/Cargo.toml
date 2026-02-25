@@ -9,7 +9,10 @@ authors.workspace = true
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
 clap.workspace = true
+cron.workspace = true
 futures.workspace = true
 intercom-compat = { path = "../intercom-compat" }
 intercom-core = { path = "../intercom-core" }

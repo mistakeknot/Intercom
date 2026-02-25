@@ -15,7 +15,10 @@ authors = ["Intercom maintainers"]
 [workspace.dependencies]
 anyhow = "1"
 axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
+cron = "0.15"
 futures = "0.3"
 libc = "0.2"
 rusqlite = { version = "0.37", features = ["bundled"] }

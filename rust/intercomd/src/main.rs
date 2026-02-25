@@ -2,6 +2,7 @@ mod container;
 mod db;
 mod events;
 mod ipc;
+mod scheduler;
 mod telegram;
 
 use std::path::PathBuf;
