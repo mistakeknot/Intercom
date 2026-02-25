@@ -50,8 +50,18 @@ cargo test --workspace
 - `GET /healthz`
 - `GET /readyz`
 - `GET /v1/runtime/profiles`
+- `POST /v1/demarch/read`
+- `POST /v1/demarch/write`
 
 These are scaffolding endpoints for deployment checks and migration wiring.
+
+Demarch write operations currently implemented in Rust:
+
+- `create_issue`
+- `update_issue`
+- `close_issue`
+- `start_run`
+- `approve_gate`
 
 ## Compatibility guarantees in this phase
 

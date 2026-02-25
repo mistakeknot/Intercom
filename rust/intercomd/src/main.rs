@@ -3,14 +3,15 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Context;
-use axum::Json;
-use axum::Router;
 use axum::extract::State;
-use axum::routing::get;
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use clap::{Parser, Subcommand};
 use intercom_compat::{LegacyLayout, LegacySnapshot, inspect_legacy_layout, inspect_legacy_sqlite};
-use intercom_core::{IntercomConfig, load_config};
-use serde::Serialize;
+use intercom_core::{
+    DemarchAdapter, DemarchResponse, IntercomConfig, ReadOperation, WriteOperation, load_config,
+};
+use serde::{Deserialize, Serialize};
 use tracing::info;
 
 #[derive(Parser, Debug)]
@@ -56,6 +57,7 @@ struct InspectLegacyArgs {
 struct AppState {
     started_at: Instant,
     config: Arc<IntercomConfig>,
+    demarch: Arc<DemarchAdapter>,
 }
 
 #[derive(Serialize)]
@@ -85,6 +87,24 @@ struct LegacyInspectResponse {
     sqlite: PathBuf,
     snapshot: LegacySnapshot,
     layout: LegacyLayout,
+}
+
+#[derive(Debug, Deserialize)]
+struct DemarchReadRequest {
+    #[serde(default)]
+    is_main: bool,
+    source_group: Option<String>,
+    #[serde(flatten)]
+    operation: ReadOperation,
+}
+
+#[derive(Debug, Deserialize)]
+struct DemarchWriteRequest {
+    #[serde(default)]
+    is_main: bool,
+    source_group: Option<String>,
+    #[serde(flatten)]
+    operation: WriteOperation,
 }
 
 #[tokio::main]
@@ -121,15 +141,21 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     }
 
     let bind = config.server.bind.clone();
+    let project_root =
+        std::env::current_dir().context("failed to resolve current working directory")?;
+    let demarch = DemarchAdapter::new(config.demarch.clone(), &project_root);
     let state = AppState {
         started_at: Instant::now(),
         config: Arc::new(config),
+        demarch: Arc::new(demarch),
     };
 
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/v1/runtime/profiles", get(runtime_profiles))
+        .route("/v1/demarch/read", post(demarch_read))
+        .route("/v1/demarch/write", post(demarch_write))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&bind)
@@ -195,4 +221,25 @@ async fn runtime_profiles(State(state): State<AppState>) -> Json<RuntimeProfiles
         default_runtime: state.config.runtimes.default_runtime.clone(),
         profiles,
     })
+}
+
+async fn demarch_read(
+    State(state): State<AppState>,
+    Json(request): Json<DemarchReadRequest>,
+) -> Json<DemarchResponse> {
+    let _ = request.source_group;
+    let _ = request.is_main;
+    Json(state.demarch.execute_read(request.operation))
+}
+
+async fn demarch_write(
+    State(state): State<AppState>,
+    Json(request): Json<DemarchWriteRequest>,
+) -> Json<DemarchResponse> {
+    let _ = request.source_group;
+    Json(
+        state
+            .demarch
+            .execute_write(request.operation, request.is_main),
+    )
 }

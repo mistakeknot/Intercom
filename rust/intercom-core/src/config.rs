@@ -127,8 +127,10 @@ impl Default for DemarchConfig {
             require_main_group_for_writes: true,
             read_allowlist: vec![
                 "ic run current --json".to_string(),
+                "ic run status --json".to_string(),
                 "ic run phase --json".to_string(),
                 "ic run artifact list --json".to_string(),
+                "ic run artifact get --json".to_string(),
                 "ic events tail --consumer=intercom --json".to_string(),
                 "bd list --json".to_string(),
                 "bd ready --json".to_string(),

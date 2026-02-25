@@ -45,8 +45,10 @@ enabled = true
 require_main_group_for_writes = true
 read_allowlist = [
   "ic run current --json",
+  "ic run status --json",
   "ic run phase --json",
   "ic run artifact list --json",
+  "ic run artifact get --json",
   "ic events tail --consumer=intercom --json",
   "bd list --json",
   "bd ready --json",
