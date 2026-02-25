@@ -155,6 +155,7 @@ pub struct IpcWatcher {
     config: IpcWatcherConfig,
     demarch: Arc<DemarchAdapter>,
     delegate: Arc<dyn IpcDelegate>,
+    registry: GroupRegistry,
 }
 
 impl IpcWatcher {
@@ -163,10 +164,20 @@ impl IpcWatcher {
         demarch: Arc<DemarchAdapter>,
         delegate: Arc<dyn IpcDelegate>,
     ) -> Self {
+        Self::with_registry(config, demarch, delegate, GroupRegistry::new())
+    }
+
+    pub fn with_registry(
+        config: IpcWatcherConfig,
+        demarch: Arc<DemarchAdapter>,
+        delegate: Arc<dyn IpcDelegate>,
+        registry: GroupRegistry,
+    ) -> Self {
         Self {
             config,
             demarch,
             delegate,
+            registry,
         }
     }
 
@@ -533,11 +544,12 @@ impl IpcWatcher {
     }
 
     /// Check if a non-main group is authorized to send to a given chat JID.
-    /// Placeholder — in production this would check registered groups.
-    fn is_authorized_target(&self, _chat_jid: &str, _group_folder: &str) -> bool {
-        // TODO: Wire to registered groups state when available in Rust.
-        // For now, reject non-main cross-group messages (safe default).
-        false
+    /// A group can send to a JID if that JID is registered to the same group folder.
+    fn is_authorized_target(&self, chat_jid: &str, group_folder: &str) -> bool {
+        match self.registry.folder_for_jid(chat_jid) {
+            Some(registered_folder) => registered_folder == group_folder,
+            None => false, // Unknown JID — reject (safe default)
+        }
     }
 }
 
@@ -621,12 +633,12 @@ fn remove_file(path: &Path) {
 
 // ── Collected group tracking (placeholder for registered-groups state) ──
 
-/// Tracks which chat JIDs belong to which group folders.
+/// Thread-safe registry tracking which chat JIDs belong to which group folders.
 /// Used for authorization of non-main message sends.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct GroupRegistry {
     /// Map from chat_jid → group_folder.
-    jid_to_folder: std::collections::HashMap<String, String>,
+    jid_to_folder: Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>,
 }
 
 impl GroupRegistry {
@@ -634,16 +646,76 @@ impl GroupRegistry {
         Self::default()
     }
 
-    pub fn register(&mut self, chat_jid: String, group_folder: String) {
-        self.jid_to_folder.insert(chat_jid, group_folder);
+    pub fn update_from_map(&self, groups: std::collections::HashMap<String, String>) {
+        let mut map = self.jid_to_folder.write().unwrap();
+        *map = groups;
     }
 
-    pub fn folder_for_jid(&self, chat_jid: &str) -> Option<&str> {
-        self.jid_to_folder.get(chat_jid).map(|s| s.as_str())
+    pub fn folder_for_jid(&self, chat_jid: &str) -> Option<String> {
+        let map = self.jid_to_folder.read().unwrap();
+        map.get(chat_jid).cloned()
     }
 
-    pub fn registered_jids(&self) -> HashSet<String> {
-        self.jid_to_folder.keys().cloned().collect()
+    pub fn len(&self) -> usize {
+        self.jid_to_folder.read().unwrap().len()
+    }
+}
+
+/// Periodically fetches registered groups from the Node host callback server.
+pub async fn sync_registry_loop(
+    registry: GroupRegistry,
+    host_callback_url: String,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .expect("failed to build reqwest client");
+
+    let url = format!("{host_callback_url}/v1/ipc/registered-groups");
+
+    // Initial delay — let Node host start up
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                match client.get(&url).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        // Response: { "tg:123": { "name": "...", "folder": "main", ... }, ... }
+                        if let Ok(body) = resp.text().await {
+                            if let Ok(parsed) = serde_json::from_str::<
+                                std::collections::HashMap<String, serde_json::Value>,
+                            >(&body) {
+                                let groups: std::collections::HashMap<String, String> = parsed
+                                    .into_iter()
+                                    .filter_map(|(jid, val)| {
+                                        val.get("folder")
+                                            .and_then(|f| f.as_str())
+                                            .map(|f| (jid, f.to_string()))
+                                    })
+                                    .collect();
+                                let count = groups.len();
+                                registry.update_from_map(groups);
+                                debug!(count, "Group registry synced from Node host");
+                            }
+                        }
+                    }
+                    Ok(resp) => {
+                        debug!(status = %resp.status(), "Group registry sync: non-200 response");
+                    }
+                    Err(err) => {
+                        debug!(err = %err, "Group registry sync: request failed (Node host may not be ready)");
+                    }
+                }
+            }
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    info!("Group registry sync shutting down");
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -712,14 +784,22 @@ mod tests {
 
     #[test]
     fn group_registry_tracks_jids() {
-        let mut registry = GroupRegistry::new();
-        registry.register("tg:123".to_string(), "team-eng".to_string());
-        registry.register("tg:456".to_string(), "main".to_string());
+        let registry = GroupRegistry::new();
+        let mut map = std::collections::HashMap::new();
+        map.insert("tg:123".to_string(), "team-eng".to_string());
+        map.insert("tg:456".to_string(), "main".to_string());
+        registry.update_from_map(map);
 
-        assert_eq!(registry.folder_for_jid("tg:123"), Some("team-eng"));
-        assert_eq!(registry.folder_for_jid("tg:456"), Some("main"));
+        assert_eq!(
+            registry.folder_for_jid("tg:123"),
+            Some("team-eng".to_string())
+        );
+        assert_eq!(
+            registry.folder_for_jid("tg:456"),
+            Some("main".to_string())
+        );
         assert_eq!(registry.folder_for_jid("tg:999"), None);
-        assert_eq!(registry.registered_jids().len(), 2);
+        assert_eq!(registry.len(), 2);
     }
 
     #[test]

@@ -203,16 +203,25 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     };
     let delegate: Arc<dyn ipc::IpcDelegate> =
         Arc::new(ipc::HttpDelegate::new(&host_callback_url));
+    let registry = ipc::GroupRegistry::new();
     info!(
         host_callback_url = %host_callback_url,
         "IPC delegate: forwarding messages/tasks to Node host"
     );
-    let ipc_watcher = ipc::IpcWatcher::new(ipc_config, demarch, delegate);
+    let ipc_watcher =
+        ipc::IpcWatcher::with_registry(ipc_config, demarch, delegate, registry.clone());
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     let ipc_shutdown_rx = shutdown_rx.clone();
     let ipc_handle = tokio::spawn(async move {
         ipc_watcher.run(ipc_shutdown_rx).await;
+    });
+
+    // Group registry sync — fetches registered groups from Node host periodically
+    let registry_shutdown_rx = shutdown_rx.clone();
+    let registry_url = host_callback_url.clone();
+    let registry_handle = tokio::spawn(async move {
+        ipc::sync_registry_loop(registry, registry_url, registry_shutdown_rx).await;
     });
 
     // Event consumer — polls ic events tail and sends push notifications
@@ -257,6 +266,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     // Signal background tasks to stop on server exit
     let _ = shutdown_tx.send(true);
     let _ = ipc_handle.await;
+    let _ = registry_handle.await;
     let _ = events_handle.await;
 
     result

@@ -22,6 +22,10 @@ export interface HostCallbackDeps {
     groupFolder: string,
     isMain: boolean,
   ) => Promise<void>;
+  getRegisteredGroups: () => Record<
+    string,
+    { name: string; folder: string; trigger: string }
+  >;
 }
 
 const MAX_BODY_BYTES = 1_048_576; // 1 MiB
@@ -69,6 +73,12 @@ export function startHostCallbackServer(
     // Health check
     if (method === 'GET' && url === '/healthz') {
       jsonResponse(res, 200, { status: 'ok', service: 'intercom-host' });
+      return;
+    }
+
+    // Registered groups (GET) — returns jid → {name, folder, trigger} map
+    if (method === 'GET' && url === '/v1/ipc/registered-groups') {
+      jsonResponse(res, 200, deps.getRegisteredGroups());
       return;
     }
 

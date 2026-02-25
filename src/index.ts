@@ -779,6 +779,7 @@ async function main(): Promise<void> {
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       await channel.sendMessage(jid, text);
     },
+    getRegisteredGroups: () => registeredGroups,
     forwardTask: async (task, groupFolder, isMain) => {
       await processTaskIpc(
         task as Parameters<typeof processTaskIpc>[0],
