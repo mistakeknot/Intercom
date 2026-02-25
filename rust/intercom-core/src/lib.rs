@@ -2,6 +2,7 @@ pub mod config;
 pub mod container;
 pub mod demarch;
 pub mod ipc;
+pub mod persistence;
 pub mod runtime;
 
 pub use config::{EventsConfig, IntercomConfig, load_config};
@@ -15,4 +16,8 @@ pub use demarch::{
     WriteOperation,
 };
 pub use ipc::{IpcGroupContext, IpcMessage, IpcQuery, IpcQueryResponse, IpcTask};
+pub use persistence::{
+    ChatInfo, ConversationMessage, NewMessage, PgPool, RegisteredGroup, ScheduledTask, TaskRunLog,
+    TaskUpdate,
+};
 pub use runtime::RuntimeKind;
