@@ -7,6 +7,7 @@ import {
   DEFAULT_MODEL,
   DEFAULT_RUNTIME,
   findModel,
+  HOST_CALLBACK_PORT,
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
   MODEL_CATALOG,
@@ -46,7 +47,8 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
-import { startIpcWatcher } from './ipc.js';
+import { startHostCallbackServer } from './host-callback.js';
+import { processTaskIpc, startIpcWatcher } from './ipc.js';
 import { findChannel, formatConversationHistory, formatMessages, formatOutbound } from './router.js';
 import { StreamAccumulator } from './stream-accumulator.js';
 import { startSchedulerLoop } from './task-scheduler.js';
@@ -769,6 +771,34 @@ async function main(): Promise<void> {
     syncGroupMetadata: (force) => whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) => writeGroupsSnapshot(gf, im, ag, rj),
+  });
+  // Host callback server — intercomd calls back here for message sends + task forwarding
+  startHostCallbackServer(HOST_CALLBACK_PORT, {
+    sendMessage: async (jid, text) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      await channel.sendMessage(jid, text);
+    },
+    forwardTask: async (task, groupFolder, isMain) => {
+      await processTaskIpc(
+        task as Parameters<typeof processTaskIpc>[0],
+        groupFolder,
+        isMain,
+        {
+          sendMessage: async (jid, rawText) => {
+            const channel = findChannel(channels, jid);
+            if (!channel) return;
+            const text = formatOutbound(rawText);
+            if (text) await channel.sendMessage(jid, text);
+          },
+          registeredGroups: () => registeredGroups,
+          registerGroup,
+          syncGroupMetadata: (force) => whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
+          getAvailableGroups,
+          writeGroupsSnapshot: (gf, im, ag, rj) => writeGroupsSnapshot(gf, im, ag, rj),
+        },
+      );
+    },
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();

@@ -183,6 +183,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     }
 
     let bind = config.server.bind.clone();
+    let host_callback_url = config.server.host_callback_url.clone();
     let project_root =
         std::env::current_dir().context("failed to resolve current working directory")?;
     let demarch = Arc::new(DemarchAdapter::new(config.demarch.clone(), &project_root));
@@ -199,7 +200,12 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         ipc_base_dir: project_root.join("data/ipc"),
         ..Default::default()
     };
-    let delegate: Arc<dyn ipc::IpcDelegate> = Arc::new(ipc::LogOnlyDelegate);
+    let delegate: Arc<dyn ipc::IpcDelegate> =
+        Arc::new(ipc::HttpDelegate::new(&host_callback_url));
+    info!(
+        host_callback_url = %host_callback_url,
+        "IPC delegate: forwarding messages/tasks to Node host"
+    );
     let ipc_watcher = ipc::IpcWatcher::new(ipc_config, demarch, delegate);
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 

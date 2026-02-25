@@ -20,6 +20,8 @@ pub struct ServerConfig {
     pub bind: String,
     pub request_timeout_ms: u64,
     pub max_body_bytes: usize,
+    /// URL of the Node host's callback server for message/task forwarding.
+    pub host_callback_url: String,
 }
 
 impl Default for ServerConfig {
@@ -28,6 +30,7 @@ impl Default for ServerConfig {
             bind: "127.0.0.1:7340".to_string(),
             request_timeout_ms: 30_000,
             max_body_bytes: 1_048_576,
+            host_callback_url: "http://127.0.0.1:7341".to_string(),
         }
     }
 }
@@ -173,6 +176,12 @@ impl IntercomConfig {
         if let Ok(dsn) = std::env::var("INTERCOM_POSTGRES_DSN") {
             if !dsn.trim().is_empty() {
                 self.storage.postgres_dsn = Some(dsn);
+            }
+        }
+
+        if let Ok(url) = std::env::var("HOST_CALLBACK_URL") {
+            if !url.trim().is_empty() {
+                self.server.host_callback_url = url;
             }
         }
 

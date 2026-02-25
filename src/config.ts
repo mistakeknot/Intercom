@@ -11,6 +11,7 @@ const envConfig = readEnvFile([
   'ASSISTANT_HAS_OWN_NUMBER',
   'INTERCOM_ENGINE',
   'INTERCOMD_URL',
+  'HOST_CALLBACK_PORT',
   'NANOCLAW_RUNTIME',
   'TELEGRAM_BOT_TOKEN',
   'TELEGRAM_ONLY',
@@ -46,6 +47,10 @@ export const INTERCOM_ENGINE: ServiceEngine =
     : 'node';
 export const INTERCOMD_URL =
   process.env.INTERCOMD_URL || envConfig.INTERCOMD_URL || 'http://127.0.0.1:7340';
+export const HOST_CALLBACK_PORT = parseInt(
+  process.env.HOST_CALLBACK_PORT || envConfig.HOST_CALLBACK_PORT || '7341',
+  10,
+);
 
 // --- Multi-runtime support ---
 export type Runtime = 'claude' | 'gemini' | 'codex';

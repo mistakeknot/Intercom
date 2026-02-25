@@ -77,6 +77,79 @@ impl IpcDelegate for LogOnlyDelegate {
     }
 }
 
+/// HTTP delegate that forwards IPC actions to the Node host's callback server.
+/// Used when intercomd runs alongside the Node host (strangler-fig transition).
+pub struct HttpDelegate {
+    client: reqwest::Client,
+    base_url: String,
+}
+
+impl HttpDelegate {
+    pub fn new(host_callback_url: impl Into<String>) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("failed to build reqwest client");
+        Self {
+            client,
+            base_url: host_callback_url.into(),
+        }
+    }
+}
+
+impl IpcDelegate for HttpDelegate {
+    fn send_message(&self, chat_jid: &str, text: &str, sender: Option<&str>) {
+        let url = format!("{}/v1/ipc/send-message", self.base_url);
+        let body = serde_json::json!({
+            "chat_jid": chat_jid,
+            "text": text,
+            "sender": sender,
+        });
+
+        // Fire-and-forget via blocking spawn — IPC delegate is called from sync code.
+        // The HTTP call is best-effort; if Node is down, message is lost (same as Node IPC).
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            match client.post(&url).json(&body).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    debug!(url = %url, "Host callback: message forwarded");
+                }
+                Ok(resp) => {
+                    warn!(url = %url, status = %resp.status(), "Host callback: message rejected");
+                }
+                Err(err) => {
+                    warn!(url = %url, err = %err, "Host callback: message send failed");
+                }
+            }
+        });
+    }
+
+    fn forward_task(&self, task: &IpcTask, group_folder: &str, is_main: bool) {
+        let url = format!("{}/v1/ipc/forward-task", self.base_url);
+        let task_json = serde_json::to_value(task).unwrap_or_default();
+        let body = serde_json::json!({
+            "task": task_json,
+            "group_folder": group_folder,
+            "is_main": is_main,
+        });
+
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            match client.post(&url).json(&body).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    debug!(url = %url, "Host callback: task forwarded");
+                }
+                Ok(resp) => {
+                    warn!(url = %url, status = %resp.status(), "Host callback: task rejected");
+                }
+                Err(err) => {
+                    warn!(url = %url, err = %err, "Host callback: task forward failed");
+                }
+            }
+        });
+    }
+}
+
 /// The IPC watcher. Owns polling state and dispatches to DemarchAdapter + delegate.
 pub struct IpcWatcher {
     config: IpcWatcherConfig,

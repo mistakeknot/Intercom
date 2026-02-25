@@ -6,6 +6,8 @@
 bind = "127.0.0.1:7340"
 request_timeout_ms = 30000
 max_body_bytes = 1048576
+# URL of Node host's callback server for IPC message/task forwarding
+host_callback_url = "http://127.0.0.1:7341"
 
 [storage]
 # Optional for later phases. If omitted, Postgres is disabled.
