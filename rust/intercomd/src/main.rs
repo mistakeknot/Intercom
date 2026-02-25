@@ -2,12 +2,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::{Parser, Subcommand};
-use intercom_compat::{LegacyLayout, LegacySnapshot, inspect_legacy_layout, inspect_legacy_sqlite};
+use intercom_compat::{
+    LegacyLayout, LegacySnapshot, MigrationOptions, inspect_legacy_layout, inspect_legacy_sqlite,
+    migrate_legacy_to_postgres, verify_migration_parity,
+};
 use intercom_core::{
     DemarchAdapter, DemarchResponse, IntercomConfig, ReadOperation, WriteOperation, load_config,
 };
@@ -29,6 +32,10 @@ enum Command {
     PrintConfig(PrintConfigArgs),
     /// Inspect legacy Intercom Node/SQLite state for migration planning.
     InspectLegacy(InspectLegacyArgs),
+    /// Migrate legacy SQLite state into Postgres (supports dry-run).
+    MigrateLegacy(MigrateLegacyArgs),
+    /// Compare legacy SQLite counts against migrated Postgres tables.
+    VerifyMigration(VerifyMigrationArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -51,6 +58,30 @@ struct InspectLegacyArgs {
     sqlite: PathBuf,
     #[arg(long, default_value = ".")]
     project_root: PathBuf,
+}
+
+#[derive(clap::Args, Debug)]
+struct MigrateLegacyArgs {
+    #[arg(long, default_value = "store/messages.db")]
+    sqlite: PathBuf,
+    #[arg(long)]
+    postgres_dsn: Option<String>,
+    #[arg(long, default_value = "sqlite_to_postgres_v1")]
+    checkpoint: String,
+    #[arg(long)]
+    dry_run: bool,
+    #[arg(long, default_value = "config/intercom.toml")]
+    config: PathBuf,
+}
+
+#[derive(clap::Args, Debug)]
+struct VerifyMigrationArgs {
+    #[arg(long, default_value = "store/messages.db")]
+    sqlite: PathBuf,
+    #[arg(long)]
+    postgres_dsn: Option<String>,
+    #[arg(long, default_value = "config/intercom.toml")]
+    config: PathBuf,
 }
 
 #[derive(Clone)]
@@ -119,6 +150,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve(args) => serve(args).await,
         Command::PrintConfig(args) => print_config(args),
         Command::InspectLegacy(args) => inspect_legacy(args),
+        Command::MigrateLegacy(args) => migrate_legacy(args).await,
+        Command::VerifyMigration(args) => verify_migration(args).await,
     }
 }
 
@@ -187,6 +220,52 @@ fn inspect_legacy(args: InspectLegacyArgs) -> anyhow::Result<()> {
 
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
+}
+
+async fn migrate_legacy(args: MigrateLegacyArgs) -> anyhow::Result<()> {
+    let postgres_dsn = if args.dry_run {
+        args.postgres_dsn.unwrap_or_default()
+    } else {
+        resolve_postgres_dsn(args.postgres_dsn, &args.config)?
+    };
+
+    let report = migrate_legacy_to_postgres(MigrationOptions {
+        sqlite_path: args.sqlite,
+        postgres_dsn,
+        dry_run: args.dry_run,
+        checkpoint_name: args.checkpoint,
+    })
+    .await?;
+
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+async fn verify_migration(args: VerifyMigrationArgs) -> anyhow::Result<()> {
+    let postgres_dsn = resolve_postgres_dsn(args.postgres_dsn, &args.config)?;
+    let report = verify_migration_parity(args.sqlite, &postgres_dsn).await?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+fn resolve_postgres_dsn(explicit: Option<String>, config_path: &PathBuf) -> anyhow::Result<String> {
+    if let Some(dsn) = explicit {
+        if !dsn.trim().is_empty() {
+            return Ok(dsn);
+        }
+    }
+
+    let config = load_config(config_path)
+        .with_context(|| format!("failed to load config from {}", config_path.display()))?;
+    if let Some(dsn) = config.storage.postgres_dsn {
+        if !dsn.trim().is_empty() {
+            return Ok(dsn);
+        }
+    }
+
+    Err(anyhow!(
+        "Postgres DSN is required. Set --postgres-dsn, INTERCOM_POSTGRES_DSN, or storage.postgres_dsn in config."
+    ))
 }
 
 async fn healthz(State(state): State<AppState>) -> Json<HealthResponse> {

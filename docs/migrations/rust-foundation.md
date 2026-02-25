@@ -41,6 +41,20 @@ cargo test --workspace
 # Inspect legacy SQLite + project layout before migration
 ./rust/target/debug/intercomd inspect-legacy --sqlite store/messages.db --project-root .
 
+# Dry-run migration plan (no Postgres writes)
+./rust/target/debug/intercomd migrate-legacy --sqlite store/messages.db --dry-run
+
+# Apply migration with checkpointing
+./rust/target/debug/intercomd migrate-legacy \
+  --sqlite store/messages.db \
+  --postgres-dsn postgres://intercom:intercom@localhost:5432/intercom \
+  --checkpoint sqlite_to_postgres_v1
+
+# Verify source/target count parity
+./rust/target/debug/intercomd verify-migration \
+  --sqlite store/messages.db \
+  --postgres-dsn postgres://intercom:intercom@localhost:5432/intercom
+
 # Start health endpoints
 ./rust/target/debug/intercomd serve --config config/intercom.toml
 ```
