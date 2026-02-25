@@ -6,7 +6,7 @@ import path from 'path';
 import { getRouterState, setRouterState } from './db.js';
 import { logger } from './logger.js';
 
-const SUMMARY_MODEL = 'gpt-5.1-codex-mini';  // Fast, cheap, good at summarization
+const SUMMARY_MODEL = 'gpt-5.3-codex';  // Full model — we have the tokens
 
 interface CachedSummary {
   summary: string;

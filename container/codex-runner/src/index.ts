@@ -26,7 +26,7 @@ import {
 } from '../../shared/ipc-input.js';
 import { archiveConversation, type ParsedMessage } from '../../shared/session-base.js';
 
-let MODEL = 'gpt-5.1-codex';
+let MODEL = 'gpt-5.3-codex';
 
 function generateSessionId(): string {
   return `codex-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

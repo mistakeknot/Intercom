@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
+import fs from 'fs';
 import path from 'path';
+import os from 'os';
+
+import { _resolveServiceCommand, _toSystemdExecStart } from './service.js';
 
 /**
  * Tests for service configuration generation.
@@ -130,5 +134,48 @@ echo $! > ${JSON.stringify(pidFile)}`;
     expect(wrapper).toContain('nohup');
     expect(wrapper).toContain(nodePath);
     expect(wrapper).toContain('nanoclaw.pid');
+  });
+});
+
+describe('service command selection', () => {
+  it('defaults to node engine', () => {
+    const original = process.env.INTERCOM_ENGINE;
+    delete process.env.INTERCOM_ENGINE;
+
+    const command = _resolveServiceCommand('/tmp/intercom', '/usr/bin/node');
+    expect(command.engine).toBe('node');
+    expect(command.executable).toBe('/usr/bin/node');
+    expect(command.args).toContain('/tmp/intercom/dist/index.js');
+
+    if (original !== undefined) process.env.INTERCOM_ENGINE = original;
+  });
+
+  it('uses rust engine when requested and binary exists', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'intercom-rust-test-'));
+    const rustBin = path.join(tmp, 'rust', 'target', 'release', 'intercomd');
+    fs.mkdirSync(path.dirname(rustBin), { recursive: true });
+    fs.writeFileSync(rustBin, '#!/bin/sh\n', { mode: 0o755 });
+
+    const original = process.env.INTERCOM_ENGINE;
+    process.env.INTERCOM_ENGINE = 'rust';
+
+    const command = _resolveServiceCommand(tmp, '/usr/bin/node');
+    expect(command.engine).toBe('rust');
+    expect(command.executable).toBe(rustBin);
+    expect(command.args[0]).toBe('serve');
+
+    if (original !== undefined) process.env.INTERCOM_ENGINE = original;
+    else delete process.env.INTERCOM_ENGINE;
+  });
+});
+
+describe('systemd exec start formatting', () => {
+  it('quotes args with spaces', () => {
+    const execStart = _toSystemdExecStart({
+      executable: '/opt/intercomd',
+      args: ['serve', '--config', '/tmp/intercom config.toml'],
+    });
+    expect(execStart).toContain('/opt/intercomd serve --config');
+    expect(execStart).toContain('\"/tmp/intercom config.toml\"');
   });
 });

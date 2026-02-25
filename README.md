@@ -145,6 +145,21 @@ Key files:
 - `src/db.ts` - SQLite operations (messages, groups, sessions, state)
 - `groups/*/CLAUDE.md` - Per-group memory
 
+## IronClaw migration foundation (experimental)
+
+Intercom now includes a Rust workspace under `rust/` that bootstraps the IronClaw replatform effort while keeping the current Node runtime as default.
+
+Available scripts:
+
+```bash
+npm run rust:check
+npm run rust:build
+npm run rust:build:release
+npm run rust:test
+```
+
+The Rust daemon entrypoint is `rust/intercomd`. See `docs/migrations/rust-foundation.md`.
+
 ## FAQ
 
 **Why WhatsApp and not Telegram/Signal/etc?**

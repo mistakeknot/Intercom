@@ -9,8 +9,10 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+import { readEnvFile } from '../src/env.js';
 import { logger } from '../src/logger.js';
 import {
+  commandExists,
   getPlatform,
   getNodePath,
   getServiceManager,
@@ -20,13 +22,23 @@ import {
 } from './platform.js';
 import { emitStatus } from './status.js';
 
+type ServiceEngine = 'node' | 'rust';
+
+interface ServiceCommand {
+  engine: ServiceEngine;
+  executable: string;
+  args: string[];
+}
+
 export async function run(_args: string[]): Promise<void> {
   const projectRoot = process.cwd();
   const platform = getPlatform();
   const nodePath = getNodePath();
   const homeDir = os.homedir();
+  const rustManifestPath = path.join(projectRoot, 'rust', 'Cargo.toml');
+  const hasRustWorkspace = fs.existsSync(rustManifestPath);
 
-  logger.info({ platform, nodePath, projectRoot }, 'Setting up service');
+  logger.info({ platform, nodePath, projectRoot, hasRustWorkspace }, 'Setting up service');
 
   // Build first
   logger.info('Building TypeScript');
@@ -49,17 +61,39 @@ export async function run(_args: string[]): Promise<void> {
     process.exit(1);
   }
 
+  // Rust build is optional in this phase. When available we compile in advance
+  // so INTERCOM_ENGINE=rust can switch service execution without manual steps.
+  if (hasRustWorkspace) {
+    if (commandExists('cargo')) {
+      try {
+        logger.info('Building Rust workspace (release)');
+        execSync('cargo build --manifest-path rust/Cargo.toml --workspace --release', {
+          cwd: projectRoot,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        logger.info('Rust build succeeded');
+      } catch (err) {
+        logger.warn({ err }, 'Rust build failed; continuing with Node service mode');
+      }
+    } else {
+      logger.warn('Cargo not found; skipping Rust workspace build');
+    }
+  }
+
+  const command = resolveServiceCommand(projectRoot, nodePath);
+
   fs.mkdirSync(path.join(projectRoot, 'logs'), { recursive: true });
 
   if (platform === 'macos') {
-    setupLaunchd(projectRoot, nodePath, homeDir);
+    setupLaunchd(projectRoot, nodePath, homeDir, command);
   } else if (platform === 'linux') {
-    setupLinux(projectRoot, nodePath, homeDir);
+    setupLinux(projectRoot, nodePath, homeDir, command);
   } else {
     emitStatus('SETUP_SERVICE', {
       SERVICE_TYPE: 'unknown',
       NODE_PATH: nodePath,
       PROJECT_PATH: projectRoot,
+      SERVICE_ENGINE: command.engine,
       STATUS: 'failed',
       ERROR: 'unsupported_platform',
       LOG: 'logs/setup.log',
@@ -68,9 +102,55 @@ export async function run(_args: string[]): Promise<void> {
   }
 }
 
-function setupLaunchd(projectRoot: string, nodePath: string, homeDir: string): void {
+function resolveServiceCommand(projectRoot: string, nodePath: string): ServiceCommand {
+  const envConfig = readEnvFile(['INTERCOM_ENGINE']);
+  const requestedEngine = (
+    process.env.INTERCOM_ENGINE ||
+    envConfig.INTERCOM_ENGINE ||
+    'node'
+  ).toLowerCase();
+
+  const rustBinary = path.join(projectRoot, 'rust', 'target', 'release', 'intercomd');
+  if (requestedEngine === 'rust') {
+    if (fs.existsSync(rustBinary)) {
+      return {
+        engine: 'rust',
+        executable: rustBinary,
+        args: ['serve', '--config', path.join(projectRoot, 'config', 'intercom.toml')],
+      };
+    }
+    logger.warn(
+      { rustBinary },
+      'INTERCOM_ENGINE=rust requested but intercomd binary was not found; falling back to Node',
+    );
+  }
+
+  return {
+    engine: 'node',
+    executable: nodePath,
+    args: [path.join(projectRoot, 'dist', 'index.js')],
+  };
+}
+
+export function _resolveServiceCommand(projectRoot: string, nodePath: string): {
+  engine: ServiceEngine;
+  executable: string;
+  args: string[];
+} {
+  return resolveServiceCommand(projectRoot, nodePath);
+}
+
+function setupLaunchd(
+  projectRoot: string,
+  nodePath: string,
+  homeDir: string,
+  command: ServiceCommand,
+): void {
   const plistPath = path.join(homeDir, 'Library', 'LaunchAgents', 'com.nanoclaw.plist');
   fs.mkdirSync(path.dirname(plistPath), { recursive: true });
+  const programArgs = [command.executable, ...command.args]
+    .map((arg) => `        <string>${arg}</string>`)
+    .join('\n');
 
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -80,8 +160,7 @@ function setupLaunchd(projectRoot: string, nodePath: string, homeDir: string): v
     <string>com.nanoclaw</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${nodePath}</string>
-        <string>${projectRoot}/dist/index.js</string>
+${programArgs}
     </array>
     <key>WorkingDirectory</key>
     <string>${projectRoot}</string>
@@ -126,6 +205,7 @@ function setupLaunchd(projectRoot: string, nodePath: string, homeDir: string): v
     SERVICE_TYPE: 'launchd',
     NODE_PATH: nodePath,
     PROJECT_PATH: projectRoot,
+    SERVICE_ENGINE: command.engine,
     PLIST_PATH: plistPath,
     SERVICE_LOADED: serviceLoaded,
     STATUS: 'success',
@@ -133,14 +213,19 @@ function setupLaunchd(projectRoot: string, nodePath: string, homeDir: string): v
   });
 }
 
-function setupLinux(projectRoot: string, nodePath: string, homeDir: string): void {
+function setupLinux(
+  projectRoot: string,
+  nodePath: string,
+  homeDir: string,
+  command: ServiceCommand,
+): void {
   const serviceManager = getServiceManager();
 
   if (serviceManager === 'systemd') {
-    setupSystemd(projectRoot, nodePath, homeDir);
+    setupSystemd(projectRoot, nodePath, homeDir, command);
   } else {
     // WSL without systemd or other Linux without systemd
-    setupNohupFallback(projectRoot, nodePath, homeDir);
+    setupNohupFallback(projectRoot, nodePath, homeDir, command);
   }
 }
 
@@ -186,7 +271,12 @@ function checkDockerGroupStale(): boolean {
   }
 }
 
-function setupSystemd(projectRoot: string, nodePath: string, homeDir: string): void {
+function setupSystemd(
+  projectRoot: string,
+  nodePath: string,
+  homeDir: string,
+  command: ServiceCommand,
+): void {
   const runningAsRoot = isRoot();
 
   // Root uses system-level service, non-root uses user-level
@@ -218,7 +308,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${nodePath} ${projectRoot}/dist/index.js
+ExecStart=${toSystemdExecStart(command)}
 WorkingDirectory=${projectRoot}
 Restart=always
 RestartSec=5
@@ -276,6 +366,7 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
     SERVICE_TYPE: runningAsRoot ? 'systemd-system' : 'systemd-user',
     NODE_PATH: nodePath,
     PROJECT_PATH: projectRoot,
+    SERVICE_ENGINE: command.engine,
     UNIT_PATH: unitPath,
     SERVICE_LOADED: serviceLoaded,
     ...(dockerGroupStale ? { DOCKER_GROUP_STALE: true } : {}),
@@ -284,7 +375,12 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
   });
 }
 
-function setupNohupFallback(projectRoot: string, nodePath: string, homeDir: string): void {
+function setupNohupFallback(
+  projectRoot: string,
+  nodePath: string,
+  homeDir: string,
+  command: ServiceCommand,
+): void {
   logger.warn('No systemd detected — generating nohup wrapper script');
 
   const wrapperPath = path.join(projectRoot, 'start-nanoclaw.sh');
@@ -310,7 +406,7 @@ function setupNohupFallback(projectRoot: string, nodePath: string, homeDir: stri
     'fi',
     '',
     'echo "Starting NanoClaw..."',
-    `nohup ${JSON.stringify(nodePath)} ${JSON.stringify(projectRoot + '/dist/index.js')} \\`,
+    `nohup ${JSON.stringify(command.executable)}${command.args.map((arg) => ` ${JSON.stringify(arg)}`).join('')} \\`,
     `  >> ${JSON.stringify(projectRoot + '/logs/nanoclaw.log')} \\`,
     `  2>> ${JSON.stringify(projectRoot + '/logs/nanoclaw.error.log')} &`,
     '',
@@ -327,10 +423,28 @@ function setupNohupFallback(projectRoot: string, nodePath: string, homeDir: stri
     SERVICE_TYPE: 'nohup',
     NODE_PATH: nodePath,
     PROJECT_PATH: projectRoot,
+    SERVICE_ENGINE: command.engine,
     WRAPPER_PATH: wrapperPath,
     SERVICE_LOADED: false,
     FALLBACK: 'wsl_no_systemd',
     STATUS: 'success',
     LOG: 'logs/setup.log',
+  });
+}
+
+function toSystemdExecStart(command: ServiceCommand): string {
+  return [command.executable, ...command.args]
+    .map((arg) => (arg.includes(' ') ? JSON.stringify(arg) : arg))
+    .join(' ');
+}
+
+export function _toSystemdExecStart(command: {
+  executable: string;
+  args: string[];
+}): string {
+  return toSystemdExecStart({
+    engine: 'node',
+    executable: command.executable,
+    args: command.args,
   });
 }

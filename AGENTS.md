@@ -203,9 +203,14 @@ npm run dev                               # Host with hot reload
 npm run build                             # Compile TypeScript
 cd container && bash build.sh latest all  # Build all container images
 cd container && bash build.sh latest gemini  # Build single runtime
+npm run rust:check                        # Check Rust migration workspace
+npm run rust:build                        # Build Rust workspace
+npm run rust:test                         # Run Rust workspace tests
 ```
 
 **Always restart the service after building:** `systemctl --user restart intercom`. The compiled JS in `dist/` is only loaded at process startup — a build without a restart means the running service still uses the old code.
+
+The Node service remains default in this phase. To test Rust service wiring, set `INTERCOM_ENGINE=rust` and run setup after building `rust/intercomd`.
 
 ### Hot Reload
 

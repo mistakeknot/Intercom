@@ -3,6 +3,7 @@ node_modules/
 
 # Build output
 dist/
+rust/target/
 
 # Local data & auth
 store/
@@ -21,6 +22,7 @@ groups/global/*
 # Secrets
 *.keys.json
 .env
+config/intercom.toml
 
 # OS
 .DS_Store

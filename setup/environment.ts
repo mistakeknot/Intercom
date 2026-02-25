@@ -39,6 +39,14 @@ export async function run(_args: string[]): Promise<void> {
     }
   }
 
+  // Check Rust toolchain (optional in this migration phase)
+  const rustc: 'installed' | 'not_found' = commandExists('rustc')
+    ? 'installed'
+    : 'not_found';
+  const cargo: 'installed' | 'not_found' = commandExists('cargo')
+    ? 'installed'
+    : 'not_found';
+
   // Check existing config
   const hasEnv = fs.existsSync(path.join(projectRoot, '.env'));
 
@@ -68,7 +76,14 @@ export async function run(_args: string[]): Promise<void> {
     }
   }
 
-  logger.info({ platform, wsl, appleContainer, docker, hasEnv, hasAuth, hasRegisteredGroups },
+  if (rustc === 'not_found' || cargo === 'not_found') {
+    logger.warn(
+      { rustc, cargo },
+      'Rust toolchain not fully available — Rust migration path will be skipped during setup',
+    );
+  }
+
+  logger.info({ platform, wsl, appleContainer, docker, rustc, cargo, hasEnv, hasAuth, hasRegisteredGroups },
     'Environment check complete');
 
   emitStatus('CHECK_ENVIRONMENT', {
@@ -77,6 +92,8 @@ export async function run(_args: string[]): Promise<void> {
     IS_HEADLESS: headless,
     APPLE_CONTAINER: appleContainer,
     DOCKER: docker,
+    RUSTC: rustc,
+    CARGO: cargo,
     HAS_ENV: hasEnv,
     HAS_AUTH: hasAuth,
     HAS_REGISTERED_GROUPS: hasRegisteredGroups,

@@ -55,7 +55,7 @@ export const MODEL_CATALOG: ModelEntry[] = [
   { id: 'claude-sonnet-4-6', runtime: 'claude', displayName: 'Claude Sonnet 4.6' },
   { id: 'gemini-3.1-pro', runtime: 'gemini', displayName: 'Gemini 3.1 Pro' },
   { id: 'gemini-2.5-flash', runtime: 'gemini', displayName: 'Gemini 2.5 Flash' },
-  { id: 'gpt-5.1-codex', runtime: 'codex', displayName: 'GPT-5.1 Codex' },
+  { id: 'gpt-5.3-codex', runtime: 'codex', displayName: 'GPT-5.3 Codex' },
 ];
 
 export const DEFAULT_MODEL = 'claude-opus-4-6';

@@ -602,6 +602,8 @@ The maintainer's responsibility when making a breaking change: make the change i
 
 An append-only file in the repo root. Each entry records a breaking change and the skill that preserves the old behavior:
 
+> Rust replatform note: the initial IronClaw migration scaffolding is tracked separately at `docs/migrations/rust-foundation.md`. Keep `migrations.yaml` for behavior-preserving core/skill migrations, and use the Rust doc for daemon/runtime migration checkpoints.
+
 ```yaml
 - since: 0.6.0
   skill: apple-containers@1.0.0

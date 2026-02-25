@@ -1,0 +1,61 @@
+# Intercom Rust daemon config (Phase 1 foundation)
+# Copy to config/intercom.toml and adjust for your environment.
+
+[server]
+bind = "127.0.0.1:7340"
+request_timeout_ms = 30000
+max_body_bytes = 1048576
+
+[storage]
+# Optional for later phases. If omitted, Postgres is disabled.
+postgres_dsn = "postgres://intercom:intercom@localhost:5432/intercom"
+sqlite_legacy_path = "store/messages.db"
+groups_dir = "groups"
+
+[runtimes]
+preserve_legacy_runtime_ids = true
+default_runtime = "claude"
+
+[runtimes.profiles.claude]
+provider = "anthropic"
+default_model = "claude-opus-4-6"
+required_env = ["CLAUDE_CODE_OAUTH_TOKEN"]
+
+[runtimes.profiles.gemini]
+provider = "code-assist"
+default_model = "gemini-3.1-pro"
+required_env = [
+  "GEMINI_REFRESH_TOKEN",
+  "GEMINI_OAUTH_CLIENT_ID",
+  "GEMINI_OAUTH_CLIENT_SECRET",
+]
+
+[runtimes.profiles.codex]
+provider = "openai"
+default_model = "gpt-5.3-codex"
+required_env = [
+  "CODEX_OAUTH_ACCESS_TOKEN",
+  "CODEX_OAUTH_REFRESH_TOKEN",
+  "CODEX_OAUTH_ID_TOKEN",
+  "CODEX_OAUTH_ACCOUNT_ID",
+]
+
+[demarch]
+enabled = true
+require_main_group_for_writes = true
+read_allowlist = [
+  "ic run current --json",
+  "ic run phase --json",
+  "ic run artifact list --json",
+  "ic events tail --consumer=intercom --json",
+  "bd list --json",
+  "bd ready --json",
+  "bd show --json",
+]
+write_allowlist = [
+  "bd create --json",
+  "bd update --json",
+  "bd close --json",
+  "ic gate override --json",
+  "ic run create --json",
+]
