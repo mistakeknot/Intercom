@@ -62,6 +62,7 @@ interface VolumeMount {
   hostPath: string;
   containerPath: string;
   readonly: boolean;
+  exclude?: string[]; // Subdirectory names to hide via tmpfs overlay
 }
 
 function buildVolumeMounts(
@@ -283,6 +284,13 @@ function buildContainerArgs(mounts: VolumeMount[], containerName: string, runtim
       args.push(...readonlyMountArgs(mount.hostPath, mount.containerPath));
     } else {
       args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
+    }
+
+    // Overlay excluded subdirectories with empty tmpfs so they're invisible to the agent
+    if (mount.exclude) {
+      for (const subdir of mount.exclude) {
+        args.push('--mount', `type=tmpfs,destination=${mount.containerPath}/${subdir},tmpfs-size=0`);
+      }
     }
   }
 

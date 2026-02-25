@@ -2,6 +2,7 @@ export interface AdditionalMount {
   hostPath: string; // Absolute path on host (supports ~ for home)
   containerPath?: string; // Optional — defaults to basename of hostPath. Mounted at /workspace/extra/{value}
   readonly?: boolean; // Default: true for safety
+  exclude?: string[]; // Subdirectory names to hide via tmpfs overlay (e.g., ["wm", "secret-project"])
 }
 
 /**

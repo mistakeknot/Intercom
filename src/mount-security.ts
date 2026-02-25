@@ -367,11 +367,13 @@ export function validateAdditionalMounts(
   hostPath: string;
   containerPath: string;
   readonly: boolean;
+  exclude?: string[];
 }> {
   const validatedMounts: Array<{
     hostPath: string;
     containerPath: string;
     readonly: boolean;
+    exclude?: string[];
   }> = [];
 
   for (const mount of mounts) {
@@ -382,6 +384,7 @@ export function validateAdditionalMounts(
         hostPath: result.realHostPath!,
         containerPath: `/workspace/extra/${result.resolvedContainerPath}`,
         readonly: result.effectiveReadonly!,
+        ...(mount.exclude?.length ? { exclude: mount.exclude } : {}),
       });
 
       logger.debug(
