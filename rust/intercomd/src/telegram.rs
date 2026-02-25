@@ -634,8 +634,8 @@ mod tests {
 
     #[test]
     fn trigger_match_is_case_insensitive() {
-        assert!(trigger_matches("@Andy please help", "@andy"));
-        assert!(!trigger_matches("hello", "@andy"));
+        assert!(trigger_matches("@Amtiskaw please help", "@amtiskaw"));
+        assert!(!trigger_matches("hello", "@amtiskaw"));
     }
 
     #[test]
@@ -659,7 +659,7 @@ mod tests {
             INSERT INTO registered_groups
               (jid, name, folder, trigger_pattern, added_at, requires_trigger, runtime)
             VALUES
-              ('tg:1', 'Team', 'team', '@Andy', '2026-01-01T00:00:00Z', 1, 'gemini');
+              ('tg:1', 'Team', 'team', '@Amtiskaw', '2026-01-01T00:00:00Z', 1, 'gemini');
             ",
         )
         .expect("seed groups");

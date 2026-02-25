@@ -96,7 +96,7 @@ All containers speak the same protocol regardless of LLM backend:
 
 **Codex** (`container/codex-runner/`):
 - Wraps `codex exec` CLI (no SDK dependency)
-- Model: `gpt-5.1-codex`
+- Model: `gpt-5.3-codex`
 - Auth via `~/.codex/auth.json` written from container secrets
 - System prompt written as `AGENTS.md` in working directory (Codex convention)
 - Each query is a fresh `codex exec` invocation (stateless per query, context via prompt)
@@ -129,6 +129,7 @@ interface Channel {
 - Bot commands: `/chatid` (get registration JID), `/ping` (health check)
 - 4096 char message splitting
 - @bot_username mention → TRIGGER_PATTERN translation
+- When `INTERCOM_ENGINE=rust`, Telegram ingress/egress is proxied through `intercomd` (`/v1/telegram/*`) with automatic fallback to the Node channel path if the bridge is unavailable
 
 **WhatsApp** (`src/channels/whatsapp.ts`):
 - Baileys library for WhatsApp Web protocol
@@ -189,9 +190,13 @@ CODEX_OAUTH_ID_TOKEN=...
 CODEX_OAUTH_ACCOUNT_ID=...
 
 # General
-ASSISTANT_NAME=Andy
+ASSISTANT_NAME=Amtiskaw
 IDLE_TIMEOUT=1800000      # 30min container idle timeout
 CONTAINER_TIMEOUT=1800000 # 30min hard timeout
+
+# Rust bridge (optional)
+INTERCOM_ENGINE=rust
+INTERCOMD_URL=http://127.0.0.1:7340
 ```
 
 ## Development
@@ -211,6 +216,13 @@ npm run rust:test                         # Run Rust workspace tests
 **Always restart the service after building:** `systemctl --user restart intercom`. The compiled JS in `dist/` is only loaded at process startup — a build without a restart means the running service still uses the old code.
 
 The Node service remains default in this phase. To test Rust service wiring, set `INTERCOM_ENGINE=rust` and run setup after building `rust/intercomd`.
+
+`intercomd` bridge endpoints currently available:
+- `POST /v1/telegram/ingress`
+- `POST /v1/telegram/send`
+- `POST /v1/telegram/edit`
+- `POST /v1/demarch/read`
+- `POST /v1/demarch/write`
 
 ### Hot Reload
 
