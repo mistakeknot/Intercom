@@ -288,6 +288,7 @@ echo '{"prompt":"What is 2+2?","groupFolder":"test","chatJid":"test","isMain":fa
 - Shell commands have secrets stripped from environment
 - Additional mounts validated against external allowlist (`~/.config/nanoclaw/mount-allowlist.json`)
 - Non-main groups can be forced read-only via allowlist
+- Hard policy block: `/wm` paths are rejected for additional mounts and shared file/shell tools
 
 ## Gotchas
 

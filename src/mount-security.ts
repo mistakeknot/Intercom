@@ -44,7 +44,10 @@ const DEFAULT_BLOCKED_PATTERNS = [
   'id_ed25519',
   'private_key',
   '.secret',
+  '/wm',
 ];
+
+const HARD_BLOCKED_ROOTS = ['/wm'] as const;
 
 /**
  * Load the mount allowlist from the external config location.
@@ -196,6 +199,15 @@ function findAllowedRoot(
   return null;
 }
 
+function isHardBlockedPath(realPath: string): boolean {
+  const normalized = path.resolve(realPath);
+  return HARD_BLOCKED_ROOTS.some(
+    (blockedRoot) =>
+      normalized === blockedRoot ||
+      normalized.startsWith(`${blockedRoot}${path.sep}`),
+  );
+}
+
 /**
  * Validate the container path to prevent escaping /workspace/extra/
  */
@@ -257,12 +269,26 @@ export function validateMount(
 
   // Expand and resolve the host path
   const expandedPath = expandPath(mount.hostPath);
+  if (isHardBlockedPath(path.resolve(expandedPath))) {
+    return {
+      allowed: false,
+      reason: `Path "${expandedPath}" is blocked by hard policy`,
+    };
+  }
+
   const realPath = getRealPath(expandedPath);
 
   if (realPath === null) {
     return {
       allowed: false,
       reason: `Host path does not exist: "${mount.hostPath}" (expanded: "${expandedPath}")`,
+    };
+  }
+
+  if (isHardBlockedPath(realPath)) {
+    return {
+      allowed: false,
+      reason: `Path "${realPath}" is blocked by hard policy`,
     };
   }
 

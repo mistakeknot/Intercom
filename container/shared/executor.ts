@@ -14,6 +14,7 @@ import { log } from './protocol.js';
 
 const MAX_OUTPUT = 30000; // chars
 const SHELL_TIMEOUT = 120_000; // 2 minutes
+const BLOCKED_PATH_ROOT = '/wm';
 
 /** Secrets to strip from shell subprocess environments */
 const SECRET_ENV_VARS = [
@@ -27,11 +28,37 @@ function truncate(text: string, max = MAX_OUTPUT): string {
   return text.slice(0, max) + `\n... (truncated at ${max} chars)`;
 }
 
+function normalizePath(p: string): string {
+  return path.resolve(p).replace(/\\/g, '/');
+}
+
+function isBlockedPath(resolvedPath: string): boolean {
+  const normalized = normalizePath(resolvedPath);
+  return normalized === BLOCKED_PATH_ROOT || normalized.startsWith(`${BLOCKED_PATH_ROOT}/`);
+}
+
+function shellCommandTouchesBlockedPath(command: string): boolean {
+  return /(^|[\s"'`])\/wm(\/|$)/.test(command);
+}
+
+function blockedPathError(): string {
+  return `Error: access to ${BLOCKED_PATH_ROOT} is blocked by policy.`;
+}
+
 export function runShellCommand(command: string, cwd?: string): string {
+  if (shellCommandTouchesBlockedPath(command)) {
+    return blockedPathError();
+  }
+
+  const resolvedCwd = cwd || '/workspace/group';
+  if (isBlockedPath(resolvedCwd)) {
+    return blockedPathError();
+  }
+
   const unsetPrefix = `unset ${SECRET_ENV_VARS.join(' ')} 2>/dev/null; `;
   try {
     const output = execSync(unsetPrefix + command, {
-      cwd: cwd || '/workspace/group',
+      cwd: resolvedCwd,
       timeout: SHELL_TIMEOUT,
       maxBuffer: 10 * 1024 * 1024,
       encoding: 'utf-8',
@@ -50,6 +77,7 @@ export function runShellCommand(command: string, cwd?: string): string {
 export function readFile(filePath: string, offset?: number, limit?: number): string {
   try {
     const resolved = path.resolve('/workspace/group', filePath);
+    if (isBlockedPath(resolved)) return blockedPathError();
     const content = fs.readFileSync(resolved, 'utf-8');
     const lines = content.split('\n');
 
@@ -68,6 +96,7 @@ export function readFile(filePath: string, offset?: number, limit?: number): str
 export function writeFile(filePath: string, content: string): string {
   try {
     const resolved = path.resolve('/workspace/group', filePath);
+    if (isBlockedPath(resolved)) return blockedPathError();
     fs.mkdirSync(path.dirname(resolved), { recursive: true });
     fs.writeFileSync(resolved, content);
     return `File written: ${resolved}`;
@@ -79,6 +108,7 @@ export function writeFile(filePath: string, content: string): string {
 export function editFile(filePath: string, oldString: string, newString: string): string {
   try {
     const resolved = path.resolve('/workspace/group', filePath);
+    if (isBlockedPath(resolved)) return blockedPathError();
     const content = fs.readFileSync(resolved, 'utf-8');
 
     const occurrences = content.split(oldString).length - 1;
@@ -98,6 +128,9 @@ export function editFile(filePath: string, oldString: string, newString: string)
 }
 
 export function grepSearch(pattern: string, searchPath?: string, includeGlob?: string): string {
+  if (searchPath && isBlockedPath(path.resolve('/workspace/group', searchPath))) {
+    return blockedPathError();
+  }
   const args = ['-rn', '--color=never'];
   if (includeGlob) args.push('--include=' + includeGlob);
   args.push('--', pattern);
@@ -122,6 +155,9 @@ export function grepSearch(pattern: string, searchPath?: string, includeGlob?: s
 
 export function globFiles(pattern: string, searchPath?: string): string {
   const basePath = searchPath || '/workspace/group';
+  if (isBlockedPath(path.resolve('/workspace/group', basePath))) {
+    return blockedPathError();
+  }
   try {
     const output = execSync(
       `find ${JSON.stringify(basePath)} -name ${JSON.stringify(pattern)} -type f 2>/dev/null | head -200`,
@@ -139,6 +175,7 @@ export function globFiles(pattern: string, searchPath?: string): string {
 
 export function listDirectory(dirPath?: string): string {
   const resolved = path.resolve('/workspace/group', dirPath || '.');
+  if (isBlockedPath(resolved)) return blockedPathError();
   try {
     const entries = fs.readdirSync(resolved, { withFileTypes: true });
     return entries
