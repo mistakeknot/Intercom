@@ -1,3 +1,4 @@
+mod ipc;
 mod telegram;
 
 use std::path::PathBuf;
@@ -184,14 +185,27 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let bind = config.server.bind.clone();
     let project_root =
         std::env::current_dir().context("failed to resolve current working directory")?;
-    let demarch = DemarchAdapter::new(config.demarch.clone(), &project_root);
+    let demarch = Arc::new(DemarchAdapter::new(config.demarch.clone(), &project_root));
     let telegram = TelegramBridge::new(&config);
     let state = AppState {
         started_at: Instant::now(),
         config: Arc::new(config),
-        demarch: Arc::new(demarch),
+        demarch: demarch.clone(),
         telegram: Arc::new(telegram),
     };
+
+    // IPC watcher — polls data/ipc/ directories for container messages/queries
+    let ipc_config = ipc::IpcWatcherConfig {
+        ipc_base_dir: project_root.join("data/ipc"),
+        ..Default::default()
+    };
+    let delegate: Arc<dyn ipc::IpcDelegate> = Arc::new(ipc::LogOnlyDelegate);
+    let ipc_watcher = ipc::IpcWatcher::new(ipc_config, demarch, delegate);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let ipc_handle = tokio::spawn(async move {
+        ipc_watcher.run(shutdown_rx).await;
+    });
 
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -208,10 +222,16 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind listener on {bind}"))?;
 
-    info!(bind = %bind, "intercomd listening");
-    axum::serve(listener, app)
+    info!(bind = %bind, "intercomd listening (IPC watcher active)");
+    let result = axum::serve(listener, app)
         .await
-        .context("server exited unexpectedly")
+        .context("server exited unexpectedly");
+
+    // Signal IPC watcher to stop on server exit
+    let _ = shutdown_tx.send(true);
+    let _ = ipc_handle.await;
+
+    result
 }
 
 fn print_config(args: PrintConfigArgs) -> anyhow::Result<()> {

@@ -72,6 +72,28 @@ cargo test --workspace
 
 These are scaffolding endpoints for deployment checks and migration wiring.
 
+## IPC watcher
+
+The `serve` command also starts a filesystem IPC watcher that polls `data/ipc/` for
+container-originated messages, tasks, and Demarch kernel queries. This is the Rust
+equivalent of `src/ipc.ts` + `src/query-handlers.ts` in the Node host.
+
+```
+data/ipc/
+├── main/
+│   ├── messages/       → outbound chat messages (container → Telegram)
+│   ├── tasks/          → task management (schedule, pause, resume, cancel)
+│   ├── queries/        → Demarch kernel queries ({uuid}.json)
+│   └── responses/      → query responses ({uuid}.json, written by intercomd)
+├── team-eng/
+│   └── ...             → same structure, per-group authorization
+└── errors/             → malformed files moved here for debugging
+```
+
+Query types supported: `run_status`, `sprint_phase`, `search_beads`, `spec_lookup`,
+`review_summary`, `next_work`, `run_events`, `create_issue`, `update_issue`,
+`close_issue`, `start_run`, `approve_gate`.
+
 When `INTERCOM_ENGINE=rust`, the Node Telegram channel can proxy ingress/egress
 through these endpoints, with automatic fallback to the existing Node channel path
 if `intercomd` is unavailable.
@@ -90,8 +112,21 @@ Demarch write operations currently implemented in Rust:
 - No destructive schema changes.
 - No required Postgres dependency to continue running existing Intercom.
 
+## Completed in Phase 1
+
+- Demarch read/write adapters in Rust with allowlist-based command policy enforcement.
+- SQLite → Postgres migrator with idempotent checkpoints, dry-run, and parity verification.
+- Telegram ingress/egress bridge through intercomd with chunking and trigger matching.
+- Filesystem IPC watcher — polls `data/ipc/{group}/` for messages, tasks, and Demarch queries.
+  - Queries dispatched to DemarchAdapter (reads + writes with main-group authorization).
+  - Messages authorized per-group (main can send anywhere, others restricted).
+  - Tasks forwarded via IpcDelegate trait (currently LogOnlyDelegate; wired to Node host next).
+  - Bad JSON moved to `errors/` directory for debugging.
+  - Atomic response writes (tmp + rename) matching Node.js behavior.
+
 ## Next phase focus
 
-- Add real Demarch read/write adapters in Rust with command policy enforcement.
-- Implement SQLite -> Postgres migrator with idempotent checkpoints.
-- Add Telegram production path into Rust runtime while preserving runtime IDs (`claude`, `gemini`, `codex`).
+- Wire IpcDelegate to Node host via HTTP (intercomd → Node bridge for message sending + task management).
+- Add event consumer loop (`ic events tail --consumer=intercom`) for push notifications.
+- Implement registered-groups state in Rust (currently placeholder — non-main authorization defaults to reject).
+- Add systemd unit for running intercomd alongside Node host.
