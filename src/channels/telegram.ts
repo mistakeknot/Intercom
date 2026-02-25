@@ -1,6 +1,11 @@
 import { Bot } from 'grammy';
 
-import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import { ASSISTANT_NAME, INTERCOM_ENGINE, TRIGGER_PATTERN } from '../config.js';
+import {
+  editTelegramViaIntercomd,
+  routeTelegramIngress,
+  sendTelegramViaIntercomd,
+} from '../intercomd-client.js';
 import { logger } from '../logger.js';
 import {
   Channel,
@@ -87,10 +92,11 @@ export class TelegramChannel implements Channel {
         'Unknown';
       const sender = ctx.from?.id.toString() || '';
       const msgId = ctx.message.message_id.toString();
+      const chatType = ctx.chat.type;
 
       // Determine chat name
       const chatName =
-        ctx.chat.type === 'private'
+        chatType === 'private'
           ? senderName
           : (ctx.chat as any).title || chatJid;
 
@@ -114,12 +120,63 @@ export class TelegramChannel implements Channel {
         }
       }
 
+      let routedByRust = false;
+      if (INTERCOM_ENGINE === 'rust') {
+        const routed = await routeTelegramIngress({
+          chat_jid: chatJid,
+          chat_name: chatName,
+          chat_type: chatType,
+          message_id: msgId,
+          sender_id: sender,
+          sender_name: senderName,
+          content,
+          timestamp,
+          persist: false,
+        });
+
+        if (routed) {
+          routedByRust = true;
+          if (!routed.accepted) {
+            logger.debug(
+              { chatJid, reason: routed.reason ?? 'rejected' },
+              'intercomd rejected Telegram ingress',
+            );
+            return;
+          }
+          if (routed.normalized_content) {
+            content = routed.normalized_content;
+          }
+          if (routed.parity.runtime_fallback_used) {
+            logger.warn(
+              {
+                chatJid,
+                runtime: routed.runtime,
+                model: routed.model,
+              },
+              'intercomd runtime profile fallback used for Telegram ingress',
+            );
+          }
+        }
+      }
+
       // Store chat metadata for discovery
-      this.opts.onChatMetadata(chatJid, timestamp, chatName);
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        chatName,
+        'telegram',
+        chatType !== 'private',
+      );
 
       // Only deliver full message for registered groups
       const group = this.opts.registeredGroups()[chatJid];
       if (!group) {
+        if (routedByRust) {
+          logger.warn(
+            { chatJid },
+            'Telegram ingress accepted by intercomd but group is missing in Node cache',
+          );
+        }
         logger.debug(
           { chatJid, chatName },
           'Message from unregistered Telegram chat',
@@ -145,7 +202,7 @@ export class TelegramChannel implements Channel {
     });
 
     // Handle non-text messages with placeholders so the agent knows something was sent
-    const storeNonText = (ctx: any, placeholder: string) => {
+    const storeNonText = async (ctx: any, placeholder: string) => {
       const chatJid = `tg:${ctx.chat.id}`;
       const group = this.opts.registeredGroups()[chatJid];
       if (!group) return;
@@ -157,35 +214,60 @@ export class TelegramChannel implements Channel {
         ctx.from?.id?.toString() ||
         'Unknown';
       const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
+      const content = `${placeholder}${caption}`;
 
-      this.opts.onChatMetadata(chatJid, timestamp);
+      if (INTERCOM_ENGINE === 'rust') {
+        const routed = await routeTelegramIngress({
+          chat_jid: chatJid,
+          chat_name:
+            ctx.chat.type === 'private'
+              ? senderName
+              : (ctx.chat as any).title || chatJid,
+          chat_type: ctx.chat.type,
+          message_id: ctx.message.message_id.toString(),
+          sender_id: ctx.from?.id?.toString() || '',
+          sender_name: senderName,
+          content,
+          timestamp,
+          persist: false,
+        });
+        if (routed && !routed.accepted) return;
+      }
+
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        ctx.chat.type !== 'private',
+      );
       this.opts.onMessage(chatJid, {
         id: ctx.message.message_id.toString(),
         chat_jid: chatJid,
         sender: ctx.from?.id?.toString() || '',
         sender_name: senderName,
-        content: `${placeholder}${caption}`,
+        content,
         timestamp,
         is_from_me: false,
       });
     };
 
-    this.bot.on('message:photo', (ctx) => storeNonText(ctx, '[Photo]'));
-    this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
-    this.bot.on('message:voice', (ctx) =>
-      storeNonText(ctx, '[Voice message]'),
+    this.bot.on('message:photo', async (ctx) => await storeNonText(ctx, '[Photo]'));
+    this.bot.on('message:video', async (ctx) => await storeNonText(ctx, '[Video]'));
+    this.bot.on('message:voice', async (ctx) =>
+      await storeNonText(ctx, '[Voice message]'),
     );
-    this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));
-    this.bot.on('message:document', (ctx) => {
+    this.bot.on('message:audio', async (ctx) => await storeNonText(ctx, '[Audio]'));
+    this.bot.on('message:document', async (ctx) => {
       const name = ctx.message.document?.file_name || 'file';
-      storeNonText(ctx, `[Document: ${name}]`);
+      await storeNonText(ctx, `[Document: ${name}]`);
     });
-    this.bot.on('message:sticker', (ctx) => {
+    this.bot.on('message:sticker', async (ctx) => {
       const emoji = ctx.message.sticker?.emoji || '';
-      storeNonText(ctx, `[Sticker ${emoji}]`);
+      await storeNonText(ctx, `[Sticker ${emoji}]`);
     });
-    this.bot.on('message:location', (ctx) => storeNonText(ctx, '[Location]'));
-    this.bot.on('message:contact', (ctx) => storeNonText(ctx, '[Contact]'));
+    this.bot.on('message:location', async (ctx) => await storeNonText(ctx, '[Location]'));
+    this.bot.on('message:contact', async (ctx) => await storeNonText(ctx, '[Contact]'));
 
     // Handle errors gracefully
     this.bot.catch((err) => {
@@ -221,6 +303,23 @@ export class TelegramChannel implements Channel {
   }
 
   async sendMessage(jid: string, text: string): Promise<void> {
+    if (INTERCOM_ENGINE === 'rust') {
+      const routed = await sendTelegramViaIntercomd({ jid, text });
+      if (routed?.ok) {
+        logger.info(
+          { jid, length: text.length, chunks: routed.chunks_sent },
+          'Telegram message sent via intercomd',
+        );
+        return;
+      }
+      if (routed && !routed.ok) {
+        logger.warn(
+          { jid, error: routed.error },
+          'intercomd send failed, falling back to Node Telegram client',
+        );
+      }
+    }
+
     if (!this.bot) {
       logger.warn('Telegram bot not initialized');
       return;
@@ -274,6 +373,19 @@ export class TelegramChannel implements Channel {
   }
 
   async sendMessageWithId(jid: string, text: string): Promise<string | null> {
+    if (INTERCOM_ENGINE === 'rust') {
+      const routed = await sendTelegramViaIntercomd({ jid, text });
+      if (routed?.ok) {
+        return routed.message_ids[0] || null;
+      }
+      if (routed && !routed.ok) {
+        logger.warn(
+          { jid, error: routed.error },
+          'intercomd send-with-id failed, falling back to Node Telegram client',
+        );
+      }
+    }
+
     if (!this.bot) return null;
     try {
       const numericId = jid.replace(/^tg:/, '');
@@ -287,6 +399,23 @@ export class TelegramChannel implements Channel {
   }
 
   async editMessage(jid: string, messageId: string, text: string): Promise<boolean> {
+    if (INTERCOM_ENGINE === 'rust') {
+      const routed = await editTelegramViaIntercomd({
+        jid,
+        message_id: messageId,
+        text,
+      });
+      if (routed?.ok) {
+        return true;
+      }
+      if (routed && !routed.ok) {
+        logger.warn(
+          { jid, messageId, error: routed.error },
+          'intercomd edit failed, falling back to Node Telegram client',
+        );
+      }
+    }
+
     if (!this.bot) return false;
     try {
       const numericId = jid.replace(/^tg:/, '');

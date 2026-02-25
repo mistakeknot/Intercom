@@ -9,6 +9,8 @@ import { readEnvFile } from './env.js';
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
+  'INTERCOM_ENGINE',
+  'INTERCOMD_URL',
   'NANOCLAW_RUNTIME',
   'TELEGRAM_BOT_TOKEN',
   'TELEGRAM_ONLY',
@@ -36,6 +38,14 @@ export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 export const MAIN_GROUP_FOLDER = 'main';
+
+export type ServiceEngine = 'node' | 'rust';
+export const INTERCOM_ENGINE: ServiceEngine =
+  (process.env.INTERCOM_ENGINE || envConfig.INTERCOM_ENGINE || 'node').toLowerCase() === 'rust'
+    ? 'rust'
+    : 'node';
+export const INTERCOMD_URL =
+  process.env.INTERCOMD_URL || envConfig.INTERCOMD_URL || 'http://127.0.0.1:7340';
 
 // --- Multi-runtime support ---
 export type Runtime = 'claude' | 'gemini' | 'codex';

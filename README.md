@@ -160,6 +160,16 @@ npm run rust:test
 
 The Rust daemon entrypoint is `rust/intercomd`. See `docs/migrations/rust-foundation.md`.
 
+For bridge testing, set:
+
+```bash
+INTERCOM_ENGINE=rust
+INTERCOMD_URL=http://127.0.0.1:7340
+```
+
+With this flag, Telegram ingress/egress will route through `intercomd` when available and
+fall back to the existing Node path on bridge failure.
+
 ## FAQ
 
 **Why WhatsApp and not Telegram/Signal/etc?**

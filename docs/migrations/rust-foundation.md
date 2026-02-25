@@ -66,8 +66,15 @@ cargo test --workspace
 - `GET /v1/runtime/profiles`
 - `POST /v1/demarch/read`
 - `POST /v1/demarch/write`
+- `POST /v1/telegram/ingress`
+- `POST /v1/telegram/send`
+- `POST /v1/telegram/edit`
 
 These are scaffolding endpoints for deployment checks and migration wiring.
+
+When `INTERCOM_ENGINE=rust`, the Node Telegram channel can proxy ingress/egress
+through these endpoints, with automatic fallback to the existing Node channel path
+if `intercomd` is unavailable.
 
 Demarch write operations currently implemented in Rust:
 

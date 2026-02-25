@@ -1,3 +1,5 @@
+mod telegram;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -15,6 +17,10 @@ use intercom_core::{
     DemarchAdapter, DemarchResponse, IntercomConfig, ReadOperation, WriteOperation, load_config,
 };
 use serde::{Deserialize, Serialize};
+use telegram::{
+    TelegramBridge, TelegramEditRequest, TelegramEditResponse, TelegramIngressRequest,
+    TelegramIngressResponse, TelegramSendRequest, TelegramSendResponse,
+};
 use tracing::info;
 
 #[derive(Parser, Debug)]
@@ -89,6 +95,7 @@ struct AppState {
     started_at: Instant,
     config: Arc<IntercomConfig>,
     demarch: Arc<DemarchAdapter>,
+    telegram: Arc<TelegramBridge>,
 }
 
 #[derive(Serialize)]
@@ -105,6 +112,7 @@ struct ReadyResponse {
     status: &'static str,
     runtime_profiles: usize,
     demarch_writes_restricted_to_main: bool,
+    telegram_bridge_enabled: bool,
 }
 
 #[derive(Serialize)]
@@ -177,10 +185,12 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let project_root =
         std::env::current_dir().context("failed to resolve current working directory")?;
     let demarch = DemarchAdapter::new(config.demarch.clone(), &project_root);
+    let telegram = TelegramBridge::new(&config);
     let state = AppState {
         started_at: Instant::now(),
         config: Arc::new(config),
         demarch: Arc::new(demarch),
+        telegram: Arc::new(telegram),
     };
 
     let app = Router::new()
@@ -189,6 +199,9 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         .route("/v1/runtime/profiles", get(runtime_profiles))
         .route("/v1/demarch/read", post(demarch_read))
         .route("/v1/demarch/write", post(demarch_write))
+        .route("/v1/telegram/ingress", post(telegram_ingress))
+        .route("/v1/telegram/send", post(telegram_send))
+        .route("/v1/telegram/edit", post(telegram_edit))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&bind)
@@ -283,6 +296,7 @@ async fn readyz(State(state): State<AppState>) -> Json<ReadyResponse> {
         status: "ready",
         runtime_profiles: state.config.runtimes.profiles.len(),
         demarch_writes_restricted_to_main: state.config.demarch.require_main_group_for_writes,
+        telegram_bridge_enabled: state.telegram.is_enabled(),
     })
 }
 
@@ -321,4 +335,49 @@ async fn demarch_write(
             .demarch
             .execute_write(request.operation, request.is_main),
     )
+}
+
+async fn telegram_ingress(
+    State(state): State<AppState>,
+    Json(request): Json<TelegramIngressRequest>,
+) -> Json<TelegramIngressResponse> {
+    match state.telegram.route_ingress(&state.config, request) {
+        Ok(response) => Json(response),
+        Err(err) => Json(TelegramIngressResponse {
+            accepted: false,
+            reason: Some(format!("routing_error: {err}")),
+            normalized_content: String::new(),
+            group_name: None,
+            group_folder: None,
+            runtime: None,
+            model: None,
+            parity: telegram::TelegramIngressParity {
+                trigger_required: false,
+                trigger_present: false,
+                runtime_profile_found: false,
+                runtime_fallback_used: false,
+                model_fallback_used: false,
+            },
+        }),
+    }
+}
+
+async fn telegram_send(
+    State(state): State<AppState>,
+    Json(request): Json<TelegramSendRequest>,
+) -> Json<TelegramSendResponse> {
+    match state.telegram.send_message(request).await {
+        Ok(response) => Json(response),
+        Err(err) => Json(TelegramSendResponse::from_error(err.to_string())),
+    }
+}
+
+async fn telegram_edit(
+    State(state): State<AppState>,
+    Json(request): Json<TelegramEditRequest>,
+) -> Json<TelegramEditResponse> {
+    match state.telegram.edit_message(request).await {
+        Ok(response) => Json(response),
+        Err(err) => Json(TelegramEditResponse::from_error(err.to_string())),
+    }
 }

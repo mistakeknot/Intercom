@@ -1,5 +1,6 @@
 # Intercom Rust daemon config (Phase 1 foundation)
 # Copy to config/intercom.toml and adjust for your environment.
+# Telegram bridge endpoints use TELEGRAM_BOT_TOKEN from environment.
 
 [server]
 bind = "127.0.0.1:7340"
