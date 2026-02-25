@@ -2,6 +2,7 @@ mod container;
 mod db;
 mod events;
 mod ipc;
+mod queue;
 mod scheduler;
 mod telegram;
 
