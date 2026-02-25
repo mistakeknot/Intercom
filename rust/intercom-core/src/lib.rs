@@ -3,7 +3,7 @@ pub mod demarch;
 pub mod ipc;
 pub mod runtime;
 
-pub use config::{IntercomConfig, load_config};
+pub use config::{EventsConfig, IntercomConfig, load_config};
 pub use demarch::{
     DemarchAdapter, DemarchCommandPlan, DemarchResponse, DemarchStatus, ReadOperation,
     WriteOperation,

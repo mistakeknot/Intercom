@@ -43,6 +43,13 @@ required_env = [
   "CODEX_OAUTH_ACCOUNT_ID",
 ]
 
+[events]
+# Enable push notifications from kernel events (gate approvals, run completions, etc.)
+enabled = false
+poll_interval_ms = 1000
+batch_size = 20
+# notification_jid = "tg:1108701034"  # Chat JID for push notifications
+
 [demarch]
 enabled = true
 require_main_group_for_writes = true

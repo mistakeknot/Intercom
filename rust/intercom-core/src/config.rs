@@ -12,6 +12,31 @@ pub struct IntercomConfig {
     pub storage: StorageConfig,
     pub runtimes: RuntimeConfig,
     pub demarch: DemarchConfig,
+    pub events: EventsConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EventsConfig {
+    /// Enable the event consumer loop.
+    pub enabled: bool,
+    /// Poll interval in milliseconds.
+    pub poll_interval_ms: u64,
+    /// Max events per poll batch.
+    pub batch_size: u32,
+    /// Chat JID to send push notifications to (usually main group).
+    pub notification_jid: Option<String>,
+}
+
+impl Default for EventsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval_ms: 1000,
+            batch_size: 20,
+            notification_jid: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

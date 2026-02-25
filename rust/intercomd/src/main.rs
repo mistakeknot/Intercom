@@ -1,3 +1,4 @@
+mod events;
 mod ipc;
 mod telegram;
 
@@ -209,8 +210,28 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let ipc_watcher = ipc::IpcWatcher::new(ipc_config, demarch, delegate);
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
+    let ipc_shutdown_rx = shutdown_rx.clone();
     let ipc_handle = tokio::spawn(async move {
-        ipc_watcher.run(shutdown_rx).await;
+        ipc_watcher.run(ipc_shutdown_rx).await;
+    });
+
+    // Event consumer — polls ic events tail and sends push notifications
+    let events_config = events::EventConsumerConfig {
+        poll_interval: std::time::Duration::from_millis(
+            state.config.events.poll_interval_ms,
+        ),
+        batch_size: state.config.events.batch_size,
+        notification_jid: state.config.events.notification_jid.clone(),
+        enabled: state.config.events.enabled,
+    };
+    let events_demarch = state.demarch.clone();
+    let events_delegate: Arc<dyn ipc::IpcDelegate> =
+        Arc::new(ipc::HttpDelegate::new(&host_callback_url));
+    let events_shutdown_rx = shutdown_rx.clone();
+    let events_handle = tokio::spawn(async move {
+        let mut consumer =
+            events::EventConsumer::new(events_config, events_demarch, events_delegate);
+        consumer.run(events_shutdown_rx).await;
     });
 
     let app = Router::new()
@@ -233,9 +254,10 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         .await
         .context("server exited unexpectedly");
 
-    // Signal IPC watcher to stop on server exit
+    // Signal background tasks to stop on server exit
     let _ = shutdown_tx.send(true);
     let _ = ipc_handle.await;
+    let _ = events_handle.await;
 
     result
 }
