@@ -1,4 +1,5 @@
 mod container;
+mod db;
 mod events;
 mod ipc;
 mod telegram;
@@ -17,7 +18,8 @@ use intercom_compat::{
     migrate_legacy_to_postgres, verify_migration_parity,
 };
 use intercom_core::{
-    DemarchAdapter, DemarchResponse, IntercomConfig, ReadOperation, WriteOperation, load_config,
+    DemarchAdapter, DemarchResponse, IntercomConfig, PgPool, ReadOperation, WriteOperation,
+    load_config,
 };
 use serde::{Deserialize, Serialize};
 use telegram::{
@@ -99,6 +101,7 @@ struct AppState {
     config: Arc<IntercomConfig>,
     demarch: Arc<DemarchAdapter>,
     telegram: Arc<TelegramBridge>,
+    db: Option<PgPool>,
 }
 
 #[derive(Serialize)]
@@ -116,6 +119,7 @@ struct ReadyResponse {
     runtime_profiles: usize,
     demarch_writes_restricted_to_main: bool,
     telegram_bridge_enabled: bool,
+    postgres_connected: bool,
 }
 
 #[derive(Serialize)]
@@ -190,11 +194,34 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         std::env::current_dir().context("failed to resolve current working directory")?;
     let demarch = Arc::new(DemarchAdapter::new(config.demarch.clone(), &project_root));
     let telegram = TelegramBridge::new(&config);
+
+    // Connect to Postgres if DSN is configured
+    let db = if let Some(ref dsn) = config.storage.postgres_dsn {
+        if !dsn.trim().is_empty() {
+            let pool = PgPool::new(dsn.clone());
+            match pool.connect().await {
+                Ok(()) => {
+                    info!("postgres persistence layer connected");
+                    Some(pool)
+                }
+                Err(e) => {
+                    tracing::warn!(err = %e, "postgres connection failed, DB endpoints disabled");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let state = AppState {
         started_at: Instant::now(),
         config: Arc::new(config),
         demarch: demarch.clone(),
         telegram: Arc::new(telegram),
+        db,
     };
 
     // IPC watcher — polls data/ipc/ directories for container messages/queries
@@ -244,6 +271,36 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         consumer.run(events_shutdown_rx).await;
     });
 
+    // DB routes use Option<PgPool> state — nested router avoids exposing
+    // full AppState to the db module.
+    let db_routes = Router::new()
+        .route("/chats", post(db::store_chat_metadata))
+        .route("/chats/name", post(db::update_chat_name))
+        .route("/chats/all", post(db::get_all_chats))
+        .route("/messages", post(db::store_message))
+        .route("/messages/new", post(db::get_new_messages))
+        .route("/messages/since", post(db::get_messages_since))
+        .route("/messages/conversation", post(db::get_recent_conversation))
+        .route("/tasks", post(db::create_task))
+        .route("/tasks/get", post(db::get_task_by_id))
+        .route("/tasks/group", post(db::get_tasks_for_group))
+        .route("/tasks/all", post(db::get_all_tasks))
+        .route("/tasks/update", post(db::update_task))
+        .route("/tasks/delete", post(db::delete_task))
+        .route("/tasks/due", post(db::get_due_tasks))
+        .route("/tasks/after-run", post(db::update_task_after_run))
+        .route("/tasks/log", post(db::log_task_run))
+        .route("/router-state/get", post(db::get_router_state))
+        .route("/router-state/set", post(db::set_router_state))
+        .route("/sessions/get", post(db::get_session))
+        .route("/sessions/set", post(db::set_session))
+        .route("/sessions/all", post(db::get_all_sessions))
+        .route("/sessions/delete", post(db::delete_session))
+        .route("/groups/get", post(db::get_registered_group))
+        .route("/groups/set", post(db::set_registered_group))
+        .route("/groups/all", post(db::get_all_registered_groups))
+        .with_state(state.db.clone());
+
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
@@ -253,6 +310,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         .route("/v1/telegram/ingress", post(telegram_ingress))
         .route("/v1/telegram/send", post(telegram_send))
         .route("/v1/telegram/edit", post(telegram_edit))
+        .nest("/v1/db", db_routes)
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&bind)
@@ -356,6 +414,7 @@ async fn readyz(State(state): State<AppState>) -> Json<ReadyResponse> {
         runtime_profiles: state.config.runtimes.profiles.len(),
         demarch_writes_restricted_to_main: state.config.demarch.require_main_group_for_writes,
         telegram_bridge_enabled: state.telegram.is_enabled(),
+        postgres_connected: state.db.is_some(),
     })
 }
 
