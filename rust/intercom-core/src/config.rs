@@ -13,6 +13,8 @@ pub struct IntercomConfig {
     pub runtimes: RuntimeConfig,
     pub demarch: DemarchConfig,
     pub events: EventsConfig,
+    pub orchestrator: OrchestratorConfig,
+    pub scheduler: SchedulerConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,6 +139,55 @@ pub struct RuntimeProfile {
     pub provider: String,
     pub default_model: String,
     pub required_env: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OrchestratorConfig {
+    /// Enable the Rust orchestrator (message loop, queue, container dispatch).
+    /// When false, intercomd runs as a sidecar only — Node remains the orchestrator.
+    pub enabled: bool,
+    /// Maximum concurrent containers across all groups.
+    pub max_concurrent_containers: usize,
+    /// Poll interval for the message loop (milliseconds).
+    pub poll_interval_ms: u64,
+    /// Idle timeout before closing container stdin (milliseconds).
+    pub idle_timeout_ms: u64,
+    /// Folder name for the main group.
+    pub main_group_folder: String,
+}
+
+impl Default for OrchestratorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_concurrent_containers: 3,
+            poll_interval_ms: 1000,
+            idle_timeout_ms: 300_000,
+            main_group_folder: "main".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SchedulerConfig {
+    /// Enable the task scheduler loop.
+    pub enabled: bool,
+    /// Poll interval for due tasks (milliseconds).
+    pub poll_interval_ms: u64,
+    /// IANA timezone for cron expressions.
+    pub timezone: String,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval_ms: 10_000,
+            timezone: "UTC".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

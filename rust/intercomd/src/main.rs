@@ -7,6 +7,7 @@ mod queue;
 mod scheduler;
 mod telegram;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -21,14 +22,15 @@ use intercom_compat::{
     migrate_legacy_to_postgres, verify_migration_parity,
 };
 use intercom_core::{
-    DemarchAdapter, DemarchResponse, IntercomConfig, PgPool, ReadOperation, WriteOperation,
-    load_config,
+    DemarchAdapter, DemarchResponse, IntercomConfig, PgPool, ReadOperation, RegisteredGroup,
+    WriteOperation, load_config,
 };
 use serde::{Deserialize, Serialize};
 use telegram::{
     TelegramBridge, TelegramEditRequest, TelegramEditResponse, TelegramIngressRequest,
     TelegramIngressResponse, TelegramSendRequest, TelegramSendResponse,
 };
+use tokio::sync::RwLock;
 use tracing::info;
 
 #[derive(Parser, Debug)]
@@ -98,6 +100,11 @@ struct VerifyMigrationArgs {
     config: PathBuf,
 }
 
+/// Shared orchestrator state: registered groups indexed by JID.
+type Groups = HashMap<String, RegisteredGroup>;
+/// Shared session state: group folder → session ID.
+type Sessions = HashMap<String, String>;
+
 #[derive(Clone)]
 struct AppState {
     started_at: Instant,
@@ -105,6 +112,9 @@ struct AppState {
     demarch: Arc<DemarchAdapter>,
     telegram: Arc<TelegramBridge>,
     db: Option<PgPool>,
+    queue: Arc<queue::GroupQueue>,
+    groups: Arc<RwLock<Groups>>,
+    sessions: Arc<RwLock<Sessions>>,
 }
 
 #[derive(Serialize)]
@@ -123,6 +133,9 @@ struct ReadyResponse {
     demarch_writes_restricted_to_main: bool,
     telegram_bridge_enabled: bool,
     postgres_connected: bool,
+    orchestrator_enabled: bool,
+    registered_groups: usize,
+    active_containers: usize,
 }
 
 #[derive(Serialize)]
@@ -219,12 +232,51 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         None
     };
 
+    // Initialize orchestrator state
+    let queue = Arc::new(queue::GroupQueue::new(
+        config.orchestrator.max_concurrent_containers,
+        project_root.join("data"),
+    ));
+
+    // Load registered groups and sessions from Postgres (if available)
+    let (groups, sessions) = if let Some(ref pool) = db {
+        let g = match pool.get_all_registered_groups().await {
+            Ok(g) => {
+                info!(count = g.len(), "loaded registered groups from Postgres");
+                g
+            }
+            Err(e) => {
+                tracing::warn!(err = %e, "failed to load groups, starting empty");
+                HashMap::new()
+            }
+        };
+        let s = match pool.get_all_sessions().await {
+            Ok(s) => {
+                info!(count = s.len(), "loaded sessions from Postgres");
+                s
+            }
+            Err(e) => {
+                tracing::warn!(err = %e, "failed to load sessions, starting empty");
+                HashMap::new()
+            }
+        };
+        (g, s)
+    } else {
+        (HashMap::new(), HashMap::new())
+    };
+
+    let groups = Arc::new(RwLock::new(groups));
+    let sessions = Arc::new(RwLock::new(sessions));
+
     let state = AppState {
         started_at: Instant::now(),
         config: Arc::new(config),
         demarch: demarch.clone(),
         telegram: Arc::new(telegram),
         db,
+        queue,
+        groups,
+        sessions,
     };
 
     // IPC watcher — polls data/ipc/ directories for container messages/queries
@@ -413,12 +465,17 @@ async fn healthz(State(state): State<AppState>) -> Json<HealthResponse> {
 }
 
 async fn readyz(State(state): State<AppState>) -> Json<ReadyResponse> {
+    let groups_count = state.groups.read().await.len();
+    let active = state.queue.active_count().await;
     Json(ReadyResponse {
         status: "ready",
         runtime_profiles: state.config.runtimes.profiles.len(),
         demarch_writes_restricted_to_main: state.config.demarch.require_main_group_for_writes,
         telegram_bridge_enabled: state.telegram.is_enabled(),
         postgres_connected: state.db.is_some(),
+        orchestrator_enabled: state.config.orchestrator.enabled,
+        registered_groups: groups_count,
+        active_containers: active,
     })
 }
 

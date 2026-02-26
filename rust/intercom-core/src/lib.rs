@@ -5,7 +5,9 @@ pub mod ipc;
 pub mod persistence;
 pub mod runtime;
 
-pub use config::{EventsConfig, IntercomConfig, load_config};
+pub use config::{
+    EventsConfig, IntercomConfig, OrchestratorConfig, SchedulerConfig, load_config,
+};
 pub use container::{
     ContainerInput, ContainerOutput, ContainerStatus, StreamEvent, VolumeMount,
     OUTPUT_END_MARKER, OUTPUT_START_MARKER, container_image, extract_output_markers,
