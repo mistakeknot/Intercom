@@ -192,4 +192,53 @@ serve() spawns:
   └── GroupQueue → dequeues → run_container_agent() → Telegram → Postgres
 ```
 
-- 129 tests across workspace (101 intercomd + 25 intercom-core + 3 intercom-compat)
+- 129 unit tests + 5 integration tests = 134 total across workspace
+
+## Phase 5 — Integration testing + flag flip (complete)
+
+### Config updates
+- `config/intercom.toml.example` now includes `[orchestrator]` and `[scheduler]` sections with all fields documented
+- Both default to `enabled = false` (safe default)
+
+### Integration test harness
+- `rust/intercomd/tests/integration_smoke.rs` — 5 tests that spawn the real binary on a random port
+- Tests: healthz, readyz (orchestrator flag), command reset effects, model switch effects, runtime profiles
+- Uses `reqwest::blocking` for synchronous HTTP against the spawned process
+- `TestServer` struct manages lifecycle with SIGTERM on drop
+
+### Node orchestrator toggle
+- `RUST_ORCHESTRATOR=true` env var disables Node's `startMessageLoop()`, `startSchedulerLoop()`, and `queue.setProcessMessagesFn()`
+- Node continues handling WhatsApp channel, IPC watcher, and host-callback server
+- IPC watcher, group registry sync, and host-callback remain active regardless of toggle
+
+### Deployment procedure
+
+**Pre-flight:**
+1. Verify intercomd is running: `systemctl --user status intercomd`
+2. Check `/readyz`: `curl -s http://localhost:7340/readyz | jq`
+3. Confirm `postgres_connected: true` and `registered_groups > 0`
+
+**Enable Rust orchestrator:**
+1. Add to `config/intercom.toml`:
+   ```toml
+   [orchestrator]
+   enabled = true
+   max_concurrent_containers = 3
+   poll_interval_ms = 1000
+   idle_timeout_ms = 300000
+   main_group_folder = "main"
+
+   [scheduler]
+   enabled = true
+   poll_interval_ms = 10000
+   timezone = "UTC"
+   ```
+2. Restart intercomd: `systemctl --user restart intercomd`
+3. Add `Environment=RUST_ORCHESTRATOR=true` to `intercom.service` override
+4. Restart Node: `systemctl --user restart intercom`
+5. Verify: send a test Telegram message, check `journalctl --user -u intercomd -f` for message loop activity
+
+**Rollback:**
+1. Remove `Environment=RUST_ORCHESTRATOR=true` from intercom.service
+2. Set `orchestrator.enabled = false` in `config/intercom.toml`
+3. Restart both: `systemctl --user restart intercomd intercom`

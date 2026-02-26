@@ -1,4 +1,4 @@
-# Intercom Rust daemon config (Phase 1 foundation)
+# Intercom Rust daemon config
 # Copy to config/intercom.toml and adjust for your environment.
 # Telegram bridge endpoints use TELEGRAM_BOT_TOKEN from environment.
 
@@ -49,6 +49,27 @@ enabled = false
 poll_interval_ms = 1000
 batch_size = 20
 # notification_jid = "tg:1108701034"  # Chat JID for push notifications
+
+[orchestrator]
+# Enable the Rust orchestrator (message loop, queue, container dispatch).
+# When false, intercomd runs as a sidecar only — Node remains the orchestrator.
+enabled = false
+# Maximum concurrent containers across all groups.
+max_concurrent_containers = 3
+# Poll interval for the message loop (milliseconds).
+poll_interval_ms = 1000
+# Idle timeout before closing container stdin (milliseconds). Default: 5 minutes.
+idle_timeout_ms = 300000
+# Folder name for the main group (receives all unmatched messages).
+main_group_folder = "main"
+
+[scheduler]
+# Enable the task scheduler loop (cron/interval/once scheduled tasks).
+enabled = false
+# Poll interval for due tasks (milliseconds).
+poll_interval_ms = 10000
+# IANA timezone for cron expressions (e.g., "Europe/Berlin").
+timezone = "UTC"
 
 [demarch]
 enabled = true
