@@ -55,13 +55,15 @@ journalctl --user -u intercomd -f
 ## HTTP endpoints
 
 - `GET /healthz` — health check with uptime
-- `GET /readyz` — readiness with profile count, feature flags
+- `GET /readyz` — readiness with profile count, feature flags, postgres status
 - `GET /v1/runtime/profiles` — configured runtime profiles
 - `POST /v1/demarch/read` — Demarch kernel read operations
 - `POST /v1/demarch/write` — Demarch kernel write operations (main-group gated)
 - `POST /v1/telegram/ingress` — route incoming Telegram messages
 - `POST /v1/telegram/send` — send Telegram message via Bot API
 - `POST /v1/telegram/edit` — edit Telegram message via Bot API
+- `POST /v1/db/*` — 25 Postgres persistence endpoints (chats, messages, tasks, sessions, groups, router state)
+- `POST /v1/commands` — slash command handler (help, status, model, reset/new)
 
 ## IPC watcher
 
@@ -108,6 +110,40 @@ Query types: `run_status`, `sprint_phase`, `search_beads`, `spec_lookup`,
 - No required Postgres dependency for existing Intercom functionality.
 - intercomd can be stopped without affecting core message flow (Node IPC watcher is still active as fallback).
 
-## Phase 3 — Container runner + persistence (planned)
+## Completed — Phase 3a (Postgres persistence)
 
-See `rust-phase3-plan.md` for the detailed implementation plan.
+- `persistence.rs` in `intercom-core`: PgPool, live schema (TIMESTAMPTZ, BOOLEAN, SERIAL, JSONB), all CRUD functions from db.ts.
+- `db.rs` in `intercomd`: 25 POST endpoints under `/v1/db/` for Node dual-write during migration.
+- Optional Postgres: graceful degradation when DSN unconfigured (503 on DB endpoints).
+
+## Completed — Phase 3b (Container runner)
+
+- `container/` module in `intercomd` with 4 submodules: security, secrets, mounts, runner.
+- Full port of `container-runner.ts`, `mount-security.ts`, and env/secrets handling.
+- `container.rs` in `intercom-core`: shared protocol types, OUTPUT marker parser.
+- 18 unit tests for protocol types, mount security, secrets parsing, runner helpers.
+
+## Completed — Phase 3c (Task scheduler)
+
+- `scheduler.rs` in `intercomd`: `calculate_next_run()` with cron (chrono-tz), interval (ms offset), once support.
+- `result_summary()` for task run result formatting (truncation, error prefix).
+- `run_scheduler_loop()` async poll loop with `tokio::select!` for graceful shutdown.
+- 10 unit tests.
+
+## Completed — Phase 3d (Group queue)
+
+- `queue.rs` in `intercomd`: `GroupQueue` with `Arc<Mutex<Inner>>` for thread-safe state.
+- Per-group serialization, global concurrency cap, task priority over messages.
+- IPC follow-up message piping, exponential retry backoff, close sentinel for container preemption.
+- Graceful shutdown with container detachment. 6 unit tests.
+
+## Completed — Phase 3e (Slash commands)
+
+- `commands.rs` in `intercomd`: model catalog (5 entries), `resolve_model()` with exact/number/substring/prefix inference.
+- `handle_command()` dispatcher for help, status, model, reset/new.
+- `POST /v1/commands` HTTP endpoint wired to `AppState`.
+- 16 unit tests.
+
+## Phase 4 — Full orchestrator (planned)
+
+See `rust-phase3-plan.md` for Phase 3 details. Next: wire scheduler, queue, and commands into the main serve loop for end-to-end orchestration.
