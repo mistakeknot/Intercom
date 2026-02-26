@@ -35,3 +35,6 @@ config/intercom.toml
 .nanoclaw/
 
 agents-sdk-docs
+
+# Clavain session artifacts
+.clavain/
