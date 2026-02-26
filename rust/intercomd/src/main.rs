@@ -1,3 +1,4 @@
+mod commands;
 mod container;
 mod db;
 mod events;
@@ -312,6 +313,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         .route("/v1/telegram/ingress", post(telegram_ingress))
         .route("/v1/telegram/send", post(telegram_send))
         .route("/v1/telegram/edit", post(telegram_edit))
+        .route("/v1/commands", post(handle_slash_command))
         .nest("/v1/db", db_routes)
         .with_state(state);
 
@@ -500,4 +502,27 @@ async fn telegram_edit(
         Ok(response) => Json(response),
         Err(err) => Json(TelegramEditResponse::from_error(err.to_string())),
     }
+}
+
+async fn handle_slash_command(
+    State(state): State<AppState>,
+    Json(request): Json<commands::CommandRequest>,
+) -> Json<commands::CommandResult> {
+    let assistant_name = std::env::var("ASSISTANT_NAME")
+        .unwrap_or_else(|_| "Amtiskaw".into());
+    let ctx = commands::CommandContext {
+        assistant_name,
+        started_at: state.started_at,
+    };
+    let result = commands::handle_command(
+        &request.command,
+        &request.args,
+        request.group_name.as_deref(),
+        request.group_folder.as_deref(),
+        request.current_model.as_deref(),
+        request.session_id.as_deref(),
+        request.container_active,
+        &ctx,
+    );
+    Json(result)
 }
