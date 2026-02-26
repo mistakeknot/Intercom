@@ -16,7 +16,7 @@ use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 use crate::container::mounts::GroupInfo;
-use crate::container::runner::{RunConfig, run_container_agent};
+use crate::container::runner::{RunConfig, run_container_agent, write_snapshots};
 use crate::container::security::ContainerConfig;
 use crate::process_group::resolve_runtime;
 use crate::queue::GroupQueue;
@@ -188,6 +188,32 @@ async fn run_scheduled_task(
             })
         },
     )));
+
+    // Write task/group snapshots for container consumption
+    {
+        let tasks_json = match pool.get_all_tasks().await {
+            Ok(tasks) => {
+                let filtered: Vec<_> = tasks.into_iter()
+                    .filter(|t| t.group_folder == task.group_folder)
+                    .collect();
+                serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".into())
+            }
+            Err(e) => {
+                warn!(err = %e, "failed to load tasks for snapshot");
+                "[]".into()
+            }
+        };
+        let groups_json = {
+            let g = groups.read().await;
+            let entries: Vec<_> = g.values().map(|rg| serde_json::json!({
+                "jid": rg.jid,
+                "name": rg.name,
+                "folder": rg.folder,
+            })).collect();
+            serde_json::to_string(&entries).unwrap_or_else(|_| "[]".into())
+        };
+        write_snapshots(&run_config.data_dir, &task.group_folder, is_main, &tasks_json, &groups_json).await;
+    }
 
     info!(
         task_id = task.id.as_str(),

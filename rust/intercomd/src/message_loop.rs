@@ -42,31 +42,37 @@ pub async fn run_message_loop(
     pool: PgPool,
     queue: Arc<GroupQueue>,
     groups: Arc<RwLock<HashMap<String, RegisteredGroup>>>,
+    shared_timestamps: Arc<RwLock<AgentTimestamps>>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let interval = Duration::from_millis(config.poll_interval_ms);
 
     // Load cursor state from Postgres
     let mut last_timestamp = load_cursor(&pool, "last_timestamp").await;
-    let mut agent_timestamps = load_agent_timestamps(&pool).await;
 
-    info!(
-        poll_interval_ms = config.poll_interval_ms,
-        last_timestamp = %last_timestamp,
-        agent_cursors = agent_timestamps.0.len(),
-        "message loop started"
-    );
+    {
+        let ts = shared_timestamps.read().await;
+        info!(
+            poll_interval_ms = config.poll_interval_ms,
+            last_timestamp = %last_timestamp,
+            agent_cursors = ts.0.len(),
+            "message loop started"
+        );
+    }
 
     // Run recovery before entering the main loop
-    recover_pending_messages(
-        &pool,
-        &queue,
-        &groups,
-        &agent_timestamps,
-        &config.assistant_name,
-        &config.main_group_folder,
-    )
-    .await;
+    {
+        let ts_snapshot = shared_timestamps.read().await.clone();
+        recover_pending_messages(
+            &pool,
+            &queue,
+            &groups,
+            &ts_snapshot,
+            &config.assistant_name,
+            &config.main_group_folder,
+        )
+        .await;
+    }
 
     loop {
         tokio::select! {
@@ -85,7 +91,7 @@ pub async fn run_message_loop(
             &queue,
             &groups,
             &mut last_timestamp,
-            &mut agent_timestamps,
+            &shared_timestamps,
         )
         .await
         {
@@ -101,7 +107,7 @@ async fn poll_once(
     queue: &GroupQueue,
     groups: &RwLock<HashMap<String, RegisteredGroup>>,
     last_timestamp: &mut String,
-    agent_timestamps: &mut AgentTimestamps,
+    shared_timestamps: &Arc<RwLock<AgentTimestamps>>,
 ) -> anyhow::Result<()> {
     let groups_guard = groups.read().await;
     let jids: Vec<String> = groups_guard.keys().cloned().collect();
@@ -159,11 +165,10 @@ async fn poll_once(
         }
 
         // Try to pipe to active container first
-        let agent_since = agent_timestamps
-            .0
-            .get(&chat_jid)
-            .cloned()
-            .unwrap_or_default();
+        let agent_since = {
+            let ts = shared_timestamps.read().await;
+            ts.0.get(&chat_jid).cloned().unwrap_or_default()
+        };
 
         // Pull ALL messages since last agent timestamp (includes accumulated context)
         let all_pending = pool
@@ -187,10 +192,9 @@ async fn poll_once(
             );
             // Advance per-group cursor
             if let Some(last) = messages_to_use.last() {
-                agent_timestamps
-                    .0
-                    .insert(chat_jid.clone(), last.timestamp.clone());
-                save_agent_timestamps(pool, &agent_timestamps).await;
+                let mut ts = shared_timestamps.write().await;
+                ts.0.insert(chat_jid.clone(), last.timestamp.clone());
+                save_agent_timestamps(pool, &ts).await;
             }
         } else {
             // No active container — enqueue for processing

@@ -118,6 +118,7 @@ struct AppState {
     queue: Arc<queue::GroupQueue>,
     groups: Arc<RwLock<Groups>>,
     sessions: Arc<RwLock<Sessions>>,
+    agent_timestamps: Arc<RwLock<message_loop::AgentTimestamps>>,
 }
 
 #[derive(Serialize)]
@@ -271,6 +272,13 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let groups = Arc::new(RwLock::new(groups));
     let sessions = Arc::new(RwLock::new(sessions));
 
+    // Load agent timestamps from Postgres (or start empty)
+    let agent_timestamps = if let Some(ref pool) = db {
+        Arc::new(RwLock::new(message_loop::load_agent_timestamps_pub(pool).await))
+    } else {
+        Arc::new(RwLock::new(message_loop::AgentTimestamps::default()))
+    };
+
     let state = AppState {
         started_at: Instant::now(),
         config: Arc::new(config),
@@ -280,6 +288,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         queue,
         groups,
         sessions,
+        agent_timestamps,
     };
 
     // IPC watcher — polls data/ipc/ directories for container messages/queries
@@ -353,6 +362,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
                 state.queue.clone(),
                 state.groups.clone(),
                 state.sessions.clone(),
+                state.agent_timestamps.clone(),
                 state.telegram.clone(),
                 assistant_name.clone(),
                 state.config.orchestrator.main_group_folder.clone(),
@@ -369,10 +379,11 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
             let ml_pool = pool.clone();
             let ml_queue = state.queue.clone();
             let ml_groups = state.groups.clone();
+            let ml_timestamps = state.agent_timestamps.clone();
             let ml_shutdown = shutdown_rx.clone();
             message_loop_handle = Some(tokio::spawn(async move {
                 message_loop::run_message_loop(
-                    ml_config, ml_pool, ml_queue, ml_groups, ml_shutdown,
+                    ml_config, ml_pool, ml_queue, ml_groups, ml_timestamps, ml_shutdown,
                 )
                 .await;
             }));

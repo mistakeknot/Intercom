@@ -23,7 +23,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 use crate::container::mounts::GroupInfo;
-use crate::container::runner::{OutputCallback, RunConfig, run_container_agent};
+use crate::container::runner::{OutputCallback, RunConfig, run_container_agent, write_snapshots};
 use crate::container::security::ContainerConfig;
 use crate::message_loop::{self, AgentTimestamps};
 use crate::queue::{GroupQueue, ProcessMessagesFn};
@@ -37,6 +37,7 @@ pub fn build_process_messages_fn(
     queue: Arc<GroupQueue>,
     groups: Arc<RwLock<HashMap<String, RegisteredGroup>>>,
     sessions: Arc<RwLock<HashMap<String, String>>>,
+    shared_timestamps: Arc<RwLock<AgentTimestamps>>,
     telegram: Arc<TelegramBridge>,
     assistant_name: String,
     main_group_folder: String,
@@ -47,6 +48,7 @@ pub fn build_process_messages_fn(
         let queue = queue.clone();
         let groups = groups.clone();
         let sessions = sessions.clone();
+        let shared_timestamps = shared_timestamps.clone();
         let telegram = telegram.clone();
         let assistant_name = assistant_name.clone();
         let main_group_folder = main_group_folder.clone();
@@ -59,6 +61,7 @@ pub fn build_process_messages_fn(
                 &queue,
                 &groups,
                 &sessions,
+                &shared_timestamps,
                 &telegram,
                 &assistant_name,
                 &main_group_folder,
@@ -83,6 +86,7 @@ async fn process_group_messages(
     queue: &Arc<GroupQueue>,
     groups: &Arc<RwLock<HashMap<String, RegisteredGroup>>>,
     sessions: &Arc<RwLock<HashMap<String, String>>>,
+    shared_timestamps: &Arc<RwLock<AgentTimestamps>>,
     telegram: &Arc<TelegramBridge>,
     assistant_name: &str,
     main_group_folder: &str,
@@ -99,13 +103,11 @@ async fn process_group_messages(
 
     let is_main = group.folder == main_group_folder;
 
-    // 2. Load agent timestamp and fetch pending messages
-    let mut agent_timestamps = message_loop::load_agent_timestamps_pub(pool).await;
-    let since = agent_timestamps
-        .0
-        .get(chat_jid)
-        .cloned()
-        .unwrap_or_default();
+    // 2. Read agent timestamp from shared state (no Postgres round-trip)
+    let since = {
+        let ts = shared_timestamps.read().await;
+        ts.0.get(chat_jid).cloned().unwrap_or_default()
+    };
 
     let pending = pool
         .get_messages_since(chat_jid, &since, assistant_name)
@@ -140,10 +142,11 @@ async fn process_group_messages(
         .unwrap_or_default();
 
     // Advance cursor before running agent (matches Node behavior)
-    agent_timestamps
-        .0
-        .insert(chat_jid.to_string(), new_cursor.clone());
-    message_loop::save_agent_timestamps_pub(pool, &agent_timestamps).await;
+    {
+        let mut ts = shared_timestamps.write().await;
+        ts.0.insert(chat_jid.to_string(), new_cursor.clone());
+        message_loop::save_agent_timestamps_pub(pool, &ts).await;
+    }
 
     info!(
         group = group.name.as_str(),
@@ -178,6 +181,34 @@ async fn process_group_messages(
             .as_ref()
             .and_then(|v| serde_json::from_value::<ContainerConfig>(v.clone()).ok()),
     };
+
+    // 5b. Write task/group snapshots for container consumption
+    {
+        let tasks_json = match pool.get_all_tasks().await {
+            Ok(tasks) => {
+                let filtered: Vec<_> = if is_main {
+                    tasks
+                } else {
+                    tasks.into_iter().filter(|t| t.group_folder == group.folder).collect()
+                };
+                serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".into())
+            }
+            Err(e) => {
+                warn!(err = %e, "failed to load tasks for snapshot");
+                "[]".into()
+            }
+        };
+        let groups_json = {
+            let g = groups.read().await;
+            let entries: Vec<_> = g.values().map(|rg| serde_json::json!({
+                "jid": rg.jid,
+                "name": rg.name,
+                "folder": rg.folder,
+            })).collect();
+            serde_json::to_string(&entries).unwrap_or_else(|_| "[]".into())
+        };
+        write_snapshots(&run_config.data_dir, &group.folder, is_main, &tasks_json, &groups_json).await;
+    }
 
     // 6. Run container and collect output
     let sessions_clone: Arc<RwLock<HashMap<String, String>>> = sessions.clone();
@@ -288,10 +319,11 @@ async fn process_group_messages(
                 }
 
                 // Rollback cursor for retry
-                agent_timestamps
-                    .0
-                    .insert(chat_jid.to_string(), previous_cursor);
-                message_loop::save_agent_timestamps_pub(pool, &agent_timestamps).await;
+                {
+                    let mut ts = shared_timestamps.write().await;
+                    ts.0.insert(chat_jid.to_string(), previous_cursor);
+                    message_loop::save_agent_timestamps_pub(pool, &ts).await;
+                }
                 warn!(
                     group = group.name.as_str(),
                     "agent error, rolled back cursor for retry"
@@ -313,10 +345,11 @@ async fn process_group_messages(
             }
 
             // Rollback cursor
-            agent_timestamps
-                .0
-                .insert(chat_jid.to_string(), previous_cursor);
-            message_loop::save_agent_timestamps_pub(pool, &agent_timestamps).await;
+            {
+                let mut ts = shared_timestamps.write().await;
+                ts.0.insert(chat_jid.to_string(), previous_cursor);
+                message_loop::save_agent_timestamps_pub(pool, &ts).await;
+            }
             Ok(false)
         }
     }
