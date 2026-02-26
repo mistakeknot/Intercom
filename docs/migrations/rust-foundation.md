@@ -243,7 +243,43 @@ Order matters — disable Node loops first to prevent dual-dispatch duplicates.
    (Rust orchestrator takes over message dispatch)
 5. Verify: send a test Telegram message, check `journalctl --user -u intercomd -f` for message loop activity
 
-**Rollback:**
+**Rollback (before Phase 6b):**
 1. Remove `Environment=RUST_ORCHESTRATOR=true` from intercom.service
 2. Set `orchestrator.enabled = false` in `config/intercom.toml`
 3. Restart both: `systemctl --user restart intercomd intercom`
+
+**Rollback (after Phase 6b):** Config rollback no longer works — Node orchestrator code is removed. Use `git revert` to the `v-pre-6b` tag, then `npm run build && systemctl --user restart intercom`.
+
+## Phase 6b — Node orchestrator code removal (complete)
+
+Removed dead Node orchestrator code after Rust cutover. The `RUST_ORCHESTRATOR` flag and its conditional blocks are gone — Rust always handles orchestration.
+
+### Removed
+- `processGroupMessages()` (~200 lines) — Rust `process_group.rs` replaces this
+- `runAgent()` (~83 lines) — Rust handles container dispatch
+- `startMessageLoop()` (~100 lines) — Rust `message_loop.rs` replaces this
+- `recoverPendingMessages()` (~12 lines) — Rust `recover_pending_messages()` replaces this
+- `loadState()` / `saveState()` cursor management — Rust holds cursors in `Arc<RwLock<AgentTimestamps>>`
+- `src/task-scheduler.ts` (249 lines) — deleted entirely, Rust `scheduler_wiring.rs` replaces
+- `src/task-scheduler.test.ts` — deleted with the module
+- `RUST_ORCHESTRATOR` flag from `config.ts` and `readEnvFile` list
+- `POLL_INTERVAL` and `SCHEDULER_POLL_INTERVAL` constants from `config.ts`
+- Summarizer integration from `handleModel` / `handleReset` (context carryover on model switch — future Rust feature)
+- `pendingModelSwitch` and `lastAgentTimestamp` state variables
+
+### Kept intact
+- `GroupQueue` (`src/group-queue.ts`) — container lifecycle management
+- `host-callback.ts` — intercomd delegates container spawning to Node
+- `container-runner.ts` — spawns containers
+- `ipc.ts` — container→host IPC watcher
+- Command handlers (`handleHelp`, `handleStatus`, `handleModel`, `handleReset`)
+- Channel code (WhatsApp, Telegram)
+- `router.ts` — message formatting for channels
+
+### Line count
+- `src/index.ts`: 919 → 423 lines (−496)
+- `src/task-scheduler.ts`: deleted (−249)
+- `src/config.ts`: 172 → 163 lines (−9)
+
+### Rollback tag
+`v-pre-6b` — tagged at trunk before code removal. Rollback: `git revert`, `npm run build`, restart.

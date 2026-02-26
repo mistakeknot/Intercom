@@ -13,7 +13,6 @@ const envConfig = readEnvFile([
   'INTERCOMD_URL',
   'HOST_CALLBACK_PORT',
   'NANOCLAW_RUNTIME',
-  'RUST_ORCHESTRATOR',
   'TELEGRAM_BOT_TOKEN',
   'TELEGRAM_ONLY',
 ]);
@@ -23,9 +22,6 @@ export const ASSISTANT_NAME =
 export const ASSISTANT_HAS_OWN_NUMBER =
   (process.env.ASSISTANT_HAS_OWN_NUMBER ||
     envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
-export const POLL_INTERVAL = 2000;
-export const SCHEDULER_POLL_INTERVAL = 60000;
-
 // Absolute paths needed for container mounts
 const PROJECT_ROOT = process.cwd();
 const HOME_DIR = process.env.HOME || os.homedir();
@@ -41,12 +37,6 @@ export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 export const MAIN_GROUP_FOLDER = 'main';
-
-// When true, Node disables its orchestrator loops (message loop, scheduler,
-// queue callback) and lets intercomd handle dispatch.  Supports both
-// process.env and .env file via readEnvFile.
-export const RUST_ORCHESTRATOR =
-  (process.env.RUST_ORCHESTRATOR || envConfig.RUST_ORCHESTRATOR) === 'true';
 
 export type ServiceEngine = 'node' | 'rust';
 export const INTERCOM_ENGINE: ServiceEngine =
