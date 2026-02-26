@@ -144,6 +144,52 @@ Query types: `run_status`, `sprint_phase`, `search_beads`, `spec_lookup`,
 - `POST /v1/commands` HTTP endpoint wired to `AppState`.
 - 16 unit tests.
 
-## Phase 4 — Full orchestrator (planned)
+## Phase 4 — Orchestrator wiring (complete)
 
-See `rust-phase3-plan.md` for Phase 3 details. Next: wire scheduler, queue, and commands into the main serve loop for end-to-end orchestration.
+Phase 4 connected the independently-built Phase 3 modules into a working orchestrator inside `intercomd`. Behind `orchestrator.enabled` feature flag.
+
+### 4a. Shared orchestrator state
+- `AppState` gains `queue: Arc<GroupQueue>`, `groups: Arc<RwLock<Groups>>`, `sessions: Arc<RwLock<Sessions>>`
+- `OrchestratorConfig` and `SchedulerConfig` in `intercom-core/config.rs`
+- Groups and sessions loaded from Postgres on startup with graceful degradation
+- `readyz` endpoint reports `orchestrator_enabled`, `registered_groups`, `active_containers`
+
+### 4b. Message loop
+- `message_loop.rs` — port of `startMessageLoop()` from Node
+- Dual-cursor design: global `last_timestamp` + per-group `last_agent_timestamp`
+- Polls PgPool for new messages, groups by JID, checks trigger patterns
+- Pipes follow-up messages to active containers; enqueues new groups into GroupQueue
+- Startup recovery re-enqueues groups with unprocessed messages
+
+### 4c. processGroupMessages callback
+- `process_group.rs` — port of `processGroupMessages()` + `runAgent()`
+- `build_process_messages_fn()` creates `ProcessMessagesFn` closure for GroupQueue
+- Full pipeline: fetch pending → check trigger → format prompt → spawn container → stream output → send via Telegram → store bot responses → manage cursor
+- Cursor rollback on error (unless output already sent to user)
+- Strips `<internal>...</internal>` blocks from agent output
+
+### 4d. Scheduler wiring
+- `scheduler_wiring.rs` — `build_task_callback()` produces `TaskCallback` for scheduler loop
+- Dispatches `DueTask` → `queue.enqueue_task()` → `run_container_agent()` → Telegram output
+- Logs task runs and advances next_run (cron/interval/once) via PgPool
+- Context mode support: `group` shares session, `isolated` gets fresh session
+
+### 4e. Command side effects
+- `CommandEffect` enum: `KillContainer`, `ClearSession`, `SwitchModel`
+- `/reset` emits `KillContainer` (if active) + `ClearSession`
+- `/model` switch emits `KillContainer` + `ClearSession` + `SwitchModel`
+- `apply_command_effects()` applies effects via queue, sessions, and Postgres
+- Intent-based pattern keeps command handlers pure and testable
+
+### serve() spawn tree (after Phase 4)
+```
+serve() spawns:
+  ├── IPC watcher (polls data/ipc/)
+  ├── Group registry sync (fetches from Node)
+  ├── Event consumer (polls ic events)
+  ├── Message loop (polls PgPool → enqueues into GroupQueue)
+  ├── Scheduler loop (polls PgPool → enqueues tasks into GroupQueue)
+  └── GroupQueue → dequeues → run_container_agent() → Telegram → Postgres
+```
+
+- 129 tests across workspace (101 intercomd + 25 intercom-core + 3 intercom-compat)
