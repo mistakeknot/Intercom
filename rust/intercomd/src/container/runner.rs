@@ -36,6 +36,7 @@ const DEFAULT_TIMEOUT_MS: u64 = 300_000;
 const DEFAULT_IDLE_TIMEOUT_MS: u64 = 1_800_000;
 
 /// Configuration for running a container agent.
+#[derive(Clone)]
 pub struct RunConfig {
     pub project_root: PathBuf,
     pub groups_dir: PathBuf,

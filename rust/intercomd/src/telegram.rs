@@ -133,6 +133,17 @@ impl TelegramBridge {
         self.bot_token.is_some()
     }
 
+    /// Convenience: send a text message to a JID (chat_id).
+    /// Used by the orchestrator to deliver agent output.
+    pub async fn send_text_to_jid(&self, jid: &str, text: &str) -> anyhow::Result<()> {
+        self.send_message(TelegramSendRequest {
+            jid: jid.to_string(),
+            text: text.to_string(),
+        })
+        .await?;
+        Ok(())
+    }
+
     pub fn route_ingress(
         &self,
         config: &IntercomConfig,

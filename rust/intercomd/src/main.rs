@@ -4,6 +4,7 @@ mod db;
 mod events;
 mod ipc;
 mod message_loop;
+mod process_group;
 mod queue;
 mod scheduler;
 mod telegram;

@@ -271,6 +271,26 @@ async fn save_cursor(pool: &PgPool, key: &str, value: &str) {
     }
 }
 
+/// Public wrapper for loading agent timestamps (used by process_group).
+pub async fn load_agent_timestamps_pub(pool: &PgPool) -> AgentTimestamps {
+    load_agent_timestamps(pool).await
+}
+
+/// Public wrapper for saving agent timestamps (used by process_group).
+pub async fn save_agent_timestamps_pub(pool: &PgPool, timestamps: &AgentTimestamps) {
+    save_agent_timestamps(pool, timestamps).await;
+}
+
+/// Public wrapper for building trigger regex (used by process_group).
+pub fn build_trigger_regex_pub(assistant_name: &str, custom_trigger: Option<&str>) -> regex::Regex {
+    build_trigger_regex(assistant_name, custom_trigger)
+}
+
+/// Public wrapper for formatting messages (used by process_group).
+pub fn format_messages_pub(messages: &[intercom_core::NewMessage]) -> String {
+    format_messages(messages)
+}
+
 async fn load_agent_timestamps(pool: &PgPool) -> AgentTimestamps {
     match pool.get_router_state("last_agent_timestamp").await {
         Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_default(),
