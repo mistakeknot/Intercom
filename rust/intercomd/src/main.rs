@@ -3,6 +3,7 @@ mod container;
 mod db;
 mod events;
 mod ipc;
+mod message_loop;
 mod queue;
 mod scheduler;
 mod telegram;
