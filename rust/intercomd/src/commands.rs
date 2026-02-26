@@ -118,11 +118,29 @@ pub fn resolve_model(args: &str) -> ModelEntry {
 // Command result
 // ---------------------------------------------------------------------------
 
+/// Side effects that the caller should apply after handling a command.
+/// Keeps command handlers pure and testable — no async, no shared state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CommandEffect {
+    /// Stop the active container for this group.
+    KillContainer,
+    /// Delete the session for this group (both in-memory and Postgres).
+    ClearSession,
+    /// Switch the group to a new model and runtime.
+    SwitchModel {
+        model_id: String,
+        runtime: String,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandResult {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parse_mode: Option<String>,
+    /// Side effects to apply. Empty for read-only commands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<CommandEffect>,
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +178,7 @@ pub fn handle_command(
         _ => CommandResult {
             text: format!("Unknown command: /{command}"),
             parse_mode: None,
+            effects: vec![],
         },
     }
 }
@@ -180,6 +199,7 @@ fn handle_help(assistant_name: &str) -> CommandResult {
              /chatid — Show this chat's registration ID"
         ),
         parse_mode: Some("Markdown".into()),
+        effects: vec![],
     }
 }
 
@@ -196,6 +216,7 @@ fn handle_status(
         return CommandResult {
             text: "This chat is not registered.".into(),
             parse_mode: None,
+            effects: vec![],
         };
     }
 
@@ -234,6 +255,7 @@ fn handle_status(
             ctx.assistant_name
         ),
         parse_mode: Some("Markdown".into()),
+        effects: vec![],
     }
 }
 
@@ -246,6 +268,7 @@ fn handle_model(
         return CommandResult {
             text: "This chat is not registered.".into(),
             parse_mode: None,
+            effects: vec![],
         };
     }
 
@@ -277,6 +300,7 @@ fn handle_model(
                 catalog_lines.join("\n")
             ),
             parse_mode: Some("Markdown".into()),
+            effects: vec![],
         };
     }
 
@@ -287,6 +311,7 @@ fn handle_model(
         return CommandResult {
             text: format!("Already using `{}`.", new_model.display_name),
             parse_mode: Some("Markdown".into()),
+            effects: vec![],
         };
     }
 
@@ -294,8 +319,6 @@ fn handle_model(
         .map(|m| m.display_name)
         .unwrap_or_else(|| current_id.to_string());
 
-    // The actual side effects (kill container, clear session, update group)
-    // are handled by the caller after receiving this result.
     CommandResult {
         text: format!(
             "Switched from {prev_display} to *{}*.\n\
@@ -303,6 +326,14 @@ fn handle_model(
             new_model.display_name
         ),
         parse_mode: Some("Markdown".into()),
+        effects: vec![
+            CommandEffect::KillContainer,
+            CommandEffect::ClearSession,
+            CommandEffect::SwitchModel {
+                model_id: new_model.id,
+                runtime: new_model.runtime,
+            },
+        ],
     }
 }
 
@@ -311,6 +342,7 @@ fn handle_reset(group_name: Option<&str>, was_active: bool) -> CommandResult {
         return CommandResult {
             text: "This chat is not registered.".into(),
             parse_mode: None,
+            effects: vec![],
         };
     }
 
@@ -320,9 +352,15 @@ fn handle_reset(group_name: Option<&str>, was_active: bool) -> CommandResult {
     }
     parts.push("Next message will start a fresh session.".to_string());
 
+    let mut effects = vec![CommandEffect::ClearSession];
+    if was_active {
+        effects.insert(0, CommandEffect::KillContainer);
+    }
+
     CommandResult {
         text: parts.join(" "),
         parse_mode: None,
+        effects,
     }
 }
 
@@ -520,5 +558,74 @@ mod tests {
     #[test]
     fn find_model_missing() {
         assert!(find_model("nonexistent").is_none());
+    }
+
+    // --- Effects tests ---
+
+    #[test]
+    fn reset_effects_with_active_container() {
+        let result = handle_command(
+            "reset", "", Some("Test"), Some("test"), None, None, true, &test_ctx(),
+        );
+        assert_eq!(result.effects, vec![
+            CommandEffect::KillContainer,
+            CommandEffect::ClearSession,
+        ]);
+    }
+
+    #[test]
+    fn reset_effects_without_active_container() {
+        let result = handle_command(
+            "reset", "", Some("Test"), Some("test"), None, None, false, &test_ctx(),
+        );
+        assert_eq!(result.effects, vec![CommandEffect::ClearSession]);
+    }
+
+    #[test]
+    fn model_switch_effects() {
+        let result = handle_command(
+            "model", "gemini-3.1-pro",
+            Some("Test"), Some("test"), Some("claude-opus-4-6"), None, false,
+            &test_ctx(),
+        );
+        assert_eq!(result.effects, vec![
+            CommandEffect::KillContainer,
+            CommandEffect::ClearSession,
+            CommandEffect::SwitchModel {
+                model_id: "gemini-3.1-pro".into(),
+                runtime: "gemini".into(),
+            },
+        ]);
+    }
+
+    #[test]
+    fn model_already_active_no_effects() {
+        let result = handle_command(
+            "model", "claude-opus-4-6",
+            Some("Test"), Some("test"), Some("claude-opus-4-6"), None, false,
+            &test_ctx(),
+        );
+        assert!(result.effects.is_empty());
+    }
+
+    #[test]
+    fn help_no_effects() {
+        let result = handle_command("help", "", None, None, None, None, false, &test_ctx());
+        assert!(result.effects.is_empty());
+    }
+
+    #[test]
+    fn status_no_effects() {
+        let result = handle_command(
+            "status", "", Some("Test"), Some("test"), Some("claude-opus-4-6"), None, true,
+            &test_ctx(),
+        );
+        assert!(result.effects.is_empty());
+    }
+
+    #[test]
+    fn unregistered_group_no_effects() {
+        let result = handle_command("reset", "", None, None, None, None, false, &test_ctx());
+        assert!(result.effects.is_empty());
     }
 }

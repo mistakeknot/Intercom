@@ -670,5 +670,65 @@ async fn handle_slash_command(
         request.container_active,
         &ctx,
     );
+
+    // Apply side effects
+    if !result.effects.is_empty() {
+        apply_command_effects(
+            &state,
+            &request.chat_jid,
+            request.group_folder.as_deref(),
+            &result.effects,
+        )
+        .await;
+    }
+
     Json(result)
+}
+
+/// Apply side effects from command handlers.
+async fn apply_command_effects(
+    state: &AppState,
+    chat_jid: &str,
+    group_folder: Option<&str>,
+    effects: &[commands::CommandEffect],
+) {
+    for effect in effects {
+        match effect {
+            commands::CommandEffect::KillContainer => {
+                state.queue.kill_group(chat_jid).await;
+            }
+            commands::CommandEffect::ClearSession => {
+                if let Some(folder) = group_folder {
+                    // Clear in-memory
+                    state.sessions.write().await.remove(folder);
+                    // Clear in Postgres
+                    if let Some(ref pool) = state.db {
+                        if let Err(e) = pool.delete_session(folder).await {
+                            tracing::warn!(err = %e, folder, "failed to delete session");
+                        }
+                    }
+                }
+            }
+            commands::CommandEffect::SwitchModel {
+                model_id,
+                runtime,
+            } => {
+                if let Some(folder) = group_folder {
+                    // Update in-memory group
+                    let mut groups = state.groups.write().await;
+                    if let Some(group) = groups.values_mut().find(|g| g.folder == folder) {
+                        group.model = Some(model_id.clone());
+                        group.runtime = Some(runtime.clone());
+
+                        // Persist to Postgres
+                        if let Some(ref pool) = state.db {
+                            if let Err(e) = pool.set_registered_group(group).await {
+                                tracing::warn!(err = %e, folder, "failed to persist model switch");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
