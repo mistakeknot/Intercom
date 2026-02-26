@@ -323,7 +323,7 @@ async fn process_group_messages(
 }
 
 /// Resolve runtime kind from group configuration.
-fn resolve_runtime(group: &RegisteredGroup) -> RuntimeKind {
+pub(crate) fn resolve_runtime(group: &RegisteredGroup) -> RuntimeKind {
     match group.runtime.as_deref() {
         Some("gemini") => RuntimeKind::Gemini,
         Some("codex") => RuntimeKind::Codex,

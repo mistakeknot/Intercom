@@ -7,6 +7,7 @@ mod message_loop;
 mod process_group;
 mod queue;
 mod scheduler;
+mod scheduler_wiring;
 mod telegram;
 
 use std::collections::HashMap;
@@ -328,6 +329,86 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         consumer.run(events_shutdown_rx).await;
     });
 
+    // Orchestrator loops (message poll + scheduler) — behind feature flag
+    let mut scheduler_handle: Option<tokio::task::JoinHandle<()>> = None;
+    let mut message_loop_handle: Option<tokio::task::JoinHandle<()>> = None;
+
+    if state.config.orchestrator.enabled {
+        if let Some(ref pool) = state.db {
+            let run_config = container::runner::RunConfig {
+                project_root: project_root.clone(),
+                groups_dir: project_root.join("groups"),
+                data_dir: project_root.join("data"),
+                timezone: state.config.scheduler.timezone.clone(),
+                idle_timeout_ms: state.config.orchestrator.idle_timeout_ms,
+                allowlist: None,
+            };
+
+            let assistant_name = std::env::var("ASSISTANT_NAME")
+                .unwrap_or_else(|_| "Amtiskaw".into());
+
+            // Wire processGroupMessages callback into the queue
+            let process_fn = process_group::build_process_messages_fn(
+                pool.clone(),
+                state.queue.clone(),
+                state.groups.clone(),
+                state.sessions.clone(),
+                state.telegram.clone(),
+                assistant_name.clone(),
+                state.config.orchestrator.main_group_folder.clone(),
+                run_config.clone(),
+            );
+            state.queue.set_process_messages_fn(process_fn).await;
+
+            // Message poll loop
+            let ml_config = message_loop::MessageLoopConfig {
+                poll_interval_ms: state.config.orchestrator.poll_interval_ms,
+                assistant_name: assistant_name.clone(),
+                main_group_folder: state.config.orchestrator.main_group_folder.clone(),
+            };
+            let ml_pool = pool.clone();
+            let ml_queue = state.queue.clone();
+            let ml_groups = state.groups.clone();
+            let ml_shutdown = shutdown_rx.clone();
+            message_loop_handle = Some(tokio::spawn(async move {
+                message_loop::run_message_loop(
+                    ml_config, ml_pool, ml_queue, ml_groups, ml_shutdown,
+                )
+                .await;
+            }));
+
+            // Scheduler loop
+            let sched_config = scheduler::SchedulerConfig {
+                poll_interval: std::time::Duration::from_millis(
+                    state.config.scheduler.poll_interval_ms,
+                ),
+                timezone: state.config.scheduler.timezone.clone(),
+                enabled: state.config.scheduler.enabled,
+            };
+            let task_callback = scheduler_wiring::build_task_callback(
+                pool.clone(),
+                state.queue.clone(),
+                state.groups.clone(),
+                state.sessions.clone(),
+                state.telegram.clone(),
+                run_config,
+                state.config.scheduler.timezone.clone(),
+            );
+            let sched_pool = pool.clone();
+            let sched_shutdown = shutdown_rx.clone();
+            scheduler_handle = Some(tokio::spawn(async move {
+                scheduler::run_scheduler_loop(
+                    sched_config, sched_pool, task_callback, sched_shutdown,
+                )
+                .await;
+            }));
+
+            info!("orchestrator enabled: message loop + scheduler wired");
+        } else {
+            tracing::warn!("orchestrator.enabled=true but no Postgres connection — orchestrator disabled");
+        }
+    }
+
     // DB routes use Option<PgPool> state — nested router avoids exposing
     // full AppState to the db module.
     let db_routes = Router::new()
@@ -385,6 +466,12 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let _ = ipc_handle.await;
     let _ = registry_handle.await;
     let _ = events_handle.await;
+    if let Some(h) = message_loop_handle {
+        let _ = h.await;
+    }
+    if let Some(h) = scheduler_handle {
+        let _ = h.await;
+    }
 
     result
 }
