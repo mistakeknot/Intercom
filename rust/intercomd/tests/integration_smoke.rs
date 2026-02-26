@@ -10,6 +10,9 @@ use std::process::{Child, Command};
 use std::time::Duration;
 
 /// Find a free port by binding to :0 and reading the assigned port.
+/// NOTE: TOCTOU race — the port is released before intercomd binds it,
+/// so another process could claim it in between. Acceptable for local
+/// tests; CI flakes should retry the test, not "fix" this function.
 fn free_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind to :0");
     listener.local_addr().unwrap().port()
@@ -111,7 +114,9 @@ impl TestServer {
 
 impl Drop for TestServer {
     fn drop(&mut self) {
-        // Send SIGTERM for graceful shutdown
+        // Send SIGTERM for graceful shutdown.
+        // SAFETY: `self.child` was spawned by us and we own it (not yet waited).
+        // `child.id()` fits in i32 because PIDs on Linux are capped at 2^22.
         #[cfg(unix)]
         {
             unsafe {

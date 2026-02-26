@@ -219,7 +219,13 @@ serve() spawns:
 3. Confirm `postgres_connected: true` and `registered_groups > 0`
 
 **Enable Rust orchestrator:**
-1. Add to `config/intercom.toml`:
+
+Order matters — disable Node loops first to prevent dual-dispatch duplicates.
+
+1. Add `Environment=RUST_ORCHESTRATOR=true` to `intercom.service` override
+2. Restart Node first: `systemctl --user restart intercom`
+   (Node now runs without message loop/scheduler — safe, intercomd still in sidecar mode)
+3. Add to `config/intercom.toml`:
    ```toml
    [orchestrator]
    enabled = true
@@ -233,9 +239,8 @@ serve() spawns:
    poll_interval_ms = 10000
    timezone = "UTC"
    ```
-2. Restart intercomd: `systemctl --user restart intercomd`
-3. Add `Environment=RUST_ORCHESTRATOR=true` to `intercom.service` override
-4. Restart Node: `systemctl --user restart intercom`
+4. Restart intercomd: `systemctl --user restart intercomd`
+   (Rust orchestrator takes over message dispatch)
 5. Verify: send a test Telegram message, check `journalctl --user -u intercomd -f` for message loop activity
 
 **Rollback:**

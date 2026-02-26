@@ -13,6 +13,7 @@ const envConfig = readEnvFile([
   'INTERCOMD_URL',
   'HOST_CALLBACK_PORT',
   'NANOCLAW_RUNTIME',
+  'RUST_ORCHESTRATOR',
   'TELEGRAM_BOT_TOKEN',
   'TELEGRAM_ONLY',
 ]);
@@ -20,7 +21,8 @@ const envConfig = readEnvFile([
 export const ASSISTANT_NAME =
   process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Amtiskaw';
 export const ASSISTANT_HAS_OWN_NUMBER =
-  (process.env.ASSISTANT_HAS_OWN_NUMBER || envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
+  (process.env.ASSISTANT_HAS_OWN_NUMBER ||
+    envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
 export const POLL_INTERVAL = 2000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
@@ -40,13 +42,25 @@ export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 export const MAIN_GROUP_FOLDER = 'main';
 
+// When true, Node disables its orchestrator loops (message loop, scheduler,
+// queue callback) and lets intercomd handle dispatch.  Supports both
+// process.env and .env file via readEnvFile.
+export const RUST_ORCHESTRATOR =
+  (process.env.RUST_ORCHESTRATOR || envConfig.RUST_ORCHESTRATOR) === 'true';
+
 export type ServiceEngine = 'node' | 'rust';
 export const INTERCOM_ENGINE: ServiceEngine =
-  (process.env.INTERCOM_ENGINE || envConfig.INTERCOM_ENGINE || 'node').toLowerCase() === 'rust'
+  (
+    process.env.INTERCOM_ENGINE ||
+    envConfig.INTERCOM_ENGINE ||
+    'node'
+  ).toLowerCase() === 'rust'
     ? 'rust'
     : 'node';
 export const INTERCOMD_URL =
-  process.env.INTERCOMD_URL || envConfig.INTERCOMD_URL || 'http://127.0.0.1:7340';
+  process.env.INTERCOMD_URL ||
+  envConfig.INTERCOMD_URL ||
+  'http://127.0.0.1:7340';
 export const HOST_CALLBACK_PORT = parseInt(
   process.env.HOST_CALLBACK_PORT || envConfig.HOST_CALLBACK_PORT || '7341',
   10,
@@ -56,27 +70,37 @@ export const HOST_CALLBACK_PORT = parseInt(
 export type Runtime = 'claude' | 'gemini' | 'codex';
 
 export const DEFAULT_RUNTIME: Runtime =
-  (process.env.NANOCLAW_RUNTIME as Runtime) || (envConfig.NANOCLAW_RUNTIME as Runtime) || 'claude';
+  (process.env.NANOCLAW_RUNTIME as Runtime) ||
+  (envConfig.NANOCLAW_RUNTIME as Runtime) ||
+  'claude';
 
 // --- Model catalog ---
 export interface ModelEntry {
-  id: string;           // e.g. 'claude-opus-4-6'
-  runtime: Runtime;     // which container image to use
-  displayName: string;  // e.g. 'Claude Opus 4.6'
+  id: string; // e.g. 'claude-opus-4-6'
+  runtime: Runtime; // which container image to use
+  displayName: string; // e.g. 'Claude Opus 4.6'
 }
 
 export const MODEL_CATALOG: ModelEntry[] = [
   { id: 'claude-opus-4-6', runtime: 'claude', displayName: 'Claude Opus 4.6' },
-  { id: 'claude-sonnet-4-6', runtime: 'claude', displayName: 'Claude Sonnet 4.6' },
+  {
+    id: 'claude-sonnet-4-6',
+    runtime: 'claude',
+    displayName: 'Claude Sonnet 4.6',
+  },
   { id: 'gemini-3.1-pro', runtime: 'gemini', displayName: 'Gemini 3.1 Pro' },
-  { id: 'gemini-2.5-flash', runtime: 'gemini', displayName: 'Gemini 2.5 Flash' },
+  {
+    id: 'gemini-2.5-flash',
+    runtime: 'gemini',
+    displayName: 'Gemini 2.5 Flash',
+  },
   { id: 'gpt-5.3-codex', runtime: 'codex', displayName: 'GPT-5.3 Codex' },
 ];
 
 export const DEFAULT_MODEL = 'claude-opus-4-6';
 
 export function findModel(id: string): ModelEntry | undefined {
-  return MODEL_CATALOG.find(m => m.id === id);
+  return MODEL_CATALOG.find((m) => m.id === id);
 }
 
 /**
@@ -91,7 +115,14 @@ export function runtimeForModel(modelId: string): Runtime {
   const id = modelId.toLowerCase();
   if (id.startsWith('claude-')) return 'claude';
   if (id.startsWith('gemini-')) return 'gemini';
-  if (id.startsWith('gpt-') || id.startsWith('codex-') || id.startsWith('o1-') || id.startsWith('o3-') || id.startsWith('o4-')) return 'codex';
+  if (
+    id.startsWith('gpt-') ||
+    id.startsWith('codex-') ||
+    id.startsWith('o1-') ||
+    id.startsWith('o3-') ||
+    id.startsWith('o4-')
+  )
+    return 'codex';
 
   return DEFAULT_RUNTIME;
 }
@@ -113,10 +144,7 @@ export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
   10,
 ); // 10MB default
 export const IPC_POLL_INTERVAL = 1000;
-export const IDLE_TIMEOUT = parseInt(
-  process.env.IDLE_TIMEOUT || '1800000',
-  10,
-); // 30min default — how long to keep container alive after last result
+export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
   1,
   parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5,

@@ -12,6 +12,7 @@ import {
   MAIN_GROUP_FOLDER,
   MODEL_CATALOG,
   POLL_INTERVAL,
+  RUST_ORCHESTRATOR,
   Runtime,
   runtimeForModel,
   TELEGRAM_BOT_TOKEN,
@@ -26,7 +27,10 @@ import {
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
-import { cleanupOrphans, ensureContainerRuntimeRunning } from './container-runtime.js';
+import {
+  cleanupOrphans,
+  ensureContainerRuntimeRunning,
+} from './container-runtime.js';
 import {
   deleteSession,
   getAllChats,
@@ -49,12 +53,26 @@ import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startHostCallbackServer } from './host-callback.js';
 import { processTaskIpc, startIpcWatcher } from './ipc.js';
-import { findChannel, formatConversationHistory, formatMessages, formatOutbound } from './router.js';
+import {
+  findChannel,
+  formatConversationHistory,
+  formatMessages,
+  formatOutbound,
+} from './router.js';
 import { StreamAccumulator } from './stream-accumulator.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { Channel, CommandResult, NewMessage, RegisteredGroup } from './types.js';
+import {
+  Channel,
+  CommandResult,
+  NewMessage,
+  RegisteredGroup,
+} from './types.js';
 import { logger } from './logger.js';
-import { generateSummary, getCachedSummary, clearCachedSummary } from './summarizer.js';
+import {
+  generateSummary,
+  getCachedSummary,
+  clearCachedSummary,
+} from './summarizer.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -90,10 +108,7 @@ function loadState(): void {
 
 function saveState(): void {
   setRouterState('last_timestamp', lastTimestamp);
-  setRouterState(
-    'last_agent_timestamp',
-    JSON.stringify(lastAgentTimestamp),
-  );
+  setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
 }
 
 function registerGroup(jid: string, group: RegisteredGroup): void {
@@ -139,7 +154,9 @@ export function getAvailableGroups(): import('./container-runner.js').AvailableG
 }
 
 /** @internal - exported for testing */
-export function _setRegisteredGroups(groups: Record<string, RegisteredGroup>): void {
+export function _setRegisteredGroups(
+  groups: Record<string, RegisteredGroup>,
+): void {
   registeredGroups = groups;
 }
 
@@ -160,7 +177,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
 
   const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
-  const missedMessages = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
+  const missedMessages = getMessagesSince(
+    chatJid,
+    sinceTimestamp,
+    ASSISTANT_NAME,
+  );
 
   if (missedMessages.length === 0) return true;
 
@@ -184,7 +205,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (cached?.summary) {
       // Summary available — use summary + last 5 raw messages for recency
       const recentRaw = getRecentConversation(chatJid, 5);
-      const rawBlock = formatConversationHistory(recentRaw, prevModel, ASSISTANT_NAME);
+      const rawBlock = formatConversationHistory(
+        recentRaw,
+        prevModel,
+        ASSISTANT_NAME,
+      );
       finalPrompt = [
         `<conversation_summary note="Prior conversation with ${prevModel}, summarized.">`,
         cached.summary,
@@ -193,15 +218,31 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         rawBlock,
         '',
         prompt,
-      ].filter(Boolean).join('\n');
-      logger.info({ group: group.name, summaryLen: cached.summary.length, recentMessages: recentRaw.length }, 'Injecting summary + recent history after model switch');
+      ]
+        .filter(Boolean)
+        .join('\n');
+      logger.info(
+        {
+          group: group.name,
+          summaryLen: cached.summary.length,
+          recentMessages: recentRaw.length,
+        },
+        'Injecting summary + recent history after model switch',
+      );
     } else {
       // Fallback — summary not ready, use raw messages (phase 1 behavior)
       const history = getRecentConversation(chatJid, 20);
-      const historyBlock = formatConversationHistory(history, prevModel, ASSISTANT_NAME);
+      const historyBlock = formatConversationHistory(
+        history,
+        prevModel,
+        ASSISTANT_NAME,
+      );
       if (historyBlock) {
         finalPrompt = historyBlock + '\n\n' + prompt;
-        logger.info({ group: group.name, historyMessages: history.length }, 'Injecting raw history (summary not available)');
+        logger.info(
+          { group: group.name, historyMessages: history.length },
+          'Injecting raw history (summary not available)',
+        );
       }
     }
 
@@ -226,7 +267,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
-      logger.debug({ group: group.name }, 'Idle timeout, closing container stdin');
+      logger.debug(
+        { group: group.name },
+        'Idle timeout, closing container stdin',
+      );
       queue.closeStdin(chatJid);
     }, IDLE_TIMEOUT);
   };
@@ -242,7 +286,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // Route streaming events to accumulator
     if (result.event && useStreaming) {
       if (result.event.type === 'tool_start') {
-        accumulator.addToolStart(result.event.toolName || 'Unknown', result.event.toolInput || '');
+        accumulator.addToolStart(
+          result.event.toolName || 'Unknown',
+          result.event.toolInput || '',
+        );
       } else if (result.event.type === 'text_delta' && result.event.text) {
         accumulator.addTextDelta(result.event.text);
       }
@@ -252,7 +299,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
     // Final result — finalize accumulator or send directly
     if (result.result) {
-      const raw = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
+      const raw =
+        typeof result.result === 'string'
+          ? result.result
+          : JSON.stringify(result.result);
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
@@ -296,13 +346,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // If we already sent output to the user, don't roll back the cursor —
     // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
-      logger.warn({ group: group.name }, 'Agent error after output was sent, skipping cursor rollback to prevent duplicates');
+      logger.warn(
+        { group: group.name },
+        'Agent error after output was sent, skipping cursor rollback to prevent duplicates',
+      );
       return true;
     }
     // Roll back cursor so retries can re-process these messages
     lastAgentTimestamp[chatJid] = previousCursor;
     saveState();
-    logger.warn({ group: group.name }, 'Agent error, rolled back message cursor for retry');
+    logger.warn(
+      { group: group.name },
+      'Agent error, rolled back message cursor for retry',
+    );
     return false;
   }
 
@@ -368,7 +424,8 @@ async function runAgent(
         isMain,
         assistantName: ASSISTANT_NAME,
       },
-      (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder),
+      (proc, containerName) =>
+        queue.registerProcess(chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
     );
 
@@ -404,7 +461,11 @@ async function startMessageLoop(): Promise<void> {
   while (true) {
     try {
       const jids = Object.keys(registeredGroups);
-      const { messages, newTimestamp } = getNewMessages(jids, lastTimestamp, ASSISTANT_NAME);
+      const { messages, newTimestamp } = getNewMessages(
+        jids,
+        lastTimestamp,
+        ASSISTANT_NAME,
+      );
 
       if (messages.length > 0) {
         logger.info({ count: messages.length }, 'New messages');
@@ -430,7 +491,9 @@ async function startMessageLoop(): Promise<void> {
 
           const channel = findChannel(channels, chatJid);
           if (!channel) {
-            console.log(`Warning: no channel owns JID ${chatJid}, skipping messages`);
+            console.log(
+              `Warning: no channel owns JID ${chatJid}, skipping messages`,
+            );
             continue;
           }
 
@@ -467,9 +530,11 @@ async function startMessageLoop(): Promise<void> {
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
             // Show typing indicator while the container processes the piped message
-            channel.setTyping?.(chatJid, true)?.catch((err) =>
-              logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
-            );
+            channel
+              .setTyping?.(chatJid, true)
+              ?.catch((err) =>
+                logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
+              );
           } else {
             // No active container — enqueue for a new one
             queue.enqueueMessageCheck(chatJid);
@@ -519,7 +584,13 @@ function clearGroupSession(groupFolder: string): void {
   // Remove from in-memory cache
   delete sessions[groupFolder];
   // Remove .sessions/*.json files (Agent SDK session state)
-  const sessionsDir = path.join(DATA_DIR, '..', 'groups', groupFolder, '.sessions');
+  const sessionsDir = path.join(
+    DATA_DIR,
+    '..',
+    'groups',
+    groupFolder,
+    '.sessions',
+  );
   try {
     const files = fs.readdirSync(sessionsDir);
     for (const f of files) {
@@ -545,7 +616,7 @@ function handleHelp(): CommandResult {
       '/reset — Clear session and stop running container',
       '/new — Start a fresh chat (alias for /reset)',
       '/ping — Check if bot is online',
-      '/chatid — Show this chat\'s registration ID',
+      "/chatid — Show this chat's registration ID",
     ].join('\n'),
     parseMode: 'Markdown',
   };
@@ -563,9 +634,8 @@ function handleStatus(chatJid: string): CommandResult {
   const uptimeMs = Date.now() - startedAt;
   const uptimeMin = Math.floor(uptimeMs / 60000);
   const uptimeHr = Math.floor(uptimeMin / 60);
-  const uptime = uptimeHr > 0
-    ? `${uptimeHr}h ${uptimeMin % 60}m`
-    : `${uptimeMin}m`;
+  const uptime =
+    uptimeHr > 0 ? `${uptimeHr}h ${uptimeMin % 60}m` : `${uptimeMin}m`;
 
   const lines = [
     `*Status for ${group.name}*`,
@@ -619,8 +689,9 @@ function handleModel(chatJid: string, args: string): CommandResult {
   // Try substring match
   if (!newModel) {
     const lower = args.toLowerCase();
-    newModel = MODEL_CATALOG.find(m =>
-      m.id.includes(lower) || m.displayName.toLowerCase().includes(lower),
+    newModel = MODEL_CATALOG.find(
+      (m) =>
+        m.id.includes(lower) || m.displayName.toLowerCase().includes(lower),
     );
   }
 
@@ -631,7 +702,10 @@ function handleModel(chatJid: string, args: string): CommandResult {
   }
 
   if (newModel.id === currentModelId) {
-    return { text: `Already using \`${newModel.displayName}\`.`, parseMode: 'Markdown' };
+    return {
+      text: `Already using \`${newModel.displayName}\`.`,
+      parseMode: 'Markdown',
+    };
   }
 
   const prevDisplay = getModelName(group.folder, currentModelId);
@@ -653,7 +727,9 @@ function handleModel(chatJid: string, args: string): CommandResult {
   // Fire-and-forget: pre-generate summary for richer context carryover
   const history = getRecentConversation(chatJid, 50);
   if (history.length > 0) {
-    generateSummary(chatJid, history, prevDisplay, ASSISTANT_NAME).catch(() => {});
+    generateSummary(chatJid, history, prevDisplay, ASSISTANT_NAME).catch(
+      () => {},
+    );
   }
 
   return {
@@ -725,8 +801,13 @@ async function main(): Promise<void> {
   // Channel callbacks (shared by all channels)
   const channelOpts = {
     onMessage: (_chatJid: string, msg: NewMessage) => storeMessage(msg),
-    onChatMetadata: (chatJid: string, timestamp: string, name?: string, channel?: string, isGroup?: boolean) =>
-      storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
+    onChatMetadata: (
+      chatJid: string,
+      timestamp: string,
+      name?: string,
+      channel?: string,
+      isGroup?: boolean,
+    ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     onCommand: handleCommand,
     registeredGroups: () => registeredGroups,
   };
@@ -745,19 +826,23 @@ async function main(): Promise<void> {
   }
 
   // Start subsystems (independently of connection handler)
-  const rustOrchestrator = process.env.RUST_ORCHESTRATOR === 'true';
-  if (rustOrchestrator) {
-    logger.info('RUST_ORCHESTRATOR=true — Node scheduler/message loop disabled, Rust orchestrator handles dispatch');
+  if (RUST_ORCHESTRATOR) {
+    logger.info(
+      'RUST_ORCHESTRATOR=true — Node scheduler/message loop disabled, Rust orchestrator handles dispatch',
+    );
   } else {
     startSchedulerLoop({
       registeredGroups: () => registeredGroups,
       getSessions: () => sessions,
       queue,
-      onProcess: (groupJid, proc, containerName, groupFolder) => queue.registerProcess(groupJid, proc, containerName, groupFolder),
+      onProcess: (groupJid, proc, containerName, groupFolder) =>
+        queue.registerProcess(groupJid, proc, containerName, groupFolder),
       sendMessage: async (jid, rawText) => {
         const channel = findChannel(channels, jid);
         if (!channel) {
-          console.log(`Warning: no channel owns JID ${jid}, cannot send message`);
+          console.log(
+            `Warning: no channel owns JID ${jid}, cannot send message`,
+          );
           return;
         }
         const text = formatOutbound(rawText);
@@ -773,9 +858,11 @@ async function main(): Promise<void> {
     },
     registeredGroups: () => registeredGroups,
     registerGroup,
-    syncGroupMetadata: (force) => whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
+    syncGroupMetadata: (force) =>
+      whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
     getAvailableGroups,
-    writeGroupsSnapshot: (gf, im, ag, rj) => writeGroupsSnapshot(gf, im, ag, rj),
+    writeGroupsSnapshot: (gf, im, ag, rj) =>
+      writeGroupsSnapshot(gf, im, ag, rj),
   });
   // Host callback server — intercomd calls back here for message sends + task forwarding
   startHostCallbackServer(HOST_CALLBACK_PORT, {
@@ -799,14 +886,16 @@ async function main(): Promise<void> {
           },
           registeredGroups: () => registeredGroups,
           registerGroup,
-          syncGroupMetadata: (force) => whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
+          syncGroupMetadata: (force) =>
+            whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
           getAvailableGroups,
-          writeGroupsSnapshot: (gf, im, ag, rj) => writeGroupsSnapshot(gf, im, ag, rj),
+          writeGroupsSnapshot: (gf, im, ag, rj) =>
+            writeGroupsSnapshot(gf, im, ag, rj),
         },
       );
     },
   });
-  if (!rustOrchestrator) {
+  if (!RUST_ORCHESTRATOR) {
     queue.setProcessMessagesFn(processGroupMessages);
     recoverPendingMessages();
     startMessageLoop().catch((err) => {
@@ -819,7 +908,8 @@ async function main(): Promise<void> {
 // Guard: only run when executed directly, not when imported by tests
 const isDirectRun =
   process.argv[1] &&
-  new URL(import.meta.url).pathname === new URL(`file://${process.argv[1]}`).pathname;
+  new URL(import.meta.url).pathname ===
+    new URL(`file://${process.argv[1]}`).pathname;
 
 if (isDirectRun) {
   main().catch((err) => {
