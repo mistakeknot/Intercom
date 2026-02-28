@@ -404,6 +404,110 @@ server.tool(
   },
 );
 
+server.tool(
+  'demarch_research',
+  'Search for research findings, discoveries, and knowledge in the Demarch platform.',
+  {
+    query: z.string().describe('Search query — keywords or topic to research'),
+  },
+  async (args) => {
+    const result = await queryKernel('research', { query: args.query });
+    return { content: [{ type: 'text' as const, text: result }] };
+  },
+);
+
+// --- Demarch Write Tools (H2) ---
+
+server.tool(
+  'demarch_create_issue',
+  'Create a new work item (bead) in the Demarch issue tracker. Returns JSON with the new bead ID.',
+  {
+    title: z.string().describe('Title for the new issue (required)'),
+    description: z.string().optional().describe('Detailed description of the issue'),
+    priority: z.string().optional().describe('Priority: 0 (critical) through 4 (backlog). Default: 2'),
+    issue_type: z.string().optional().describe('Type: task, feature, bug, epic. Default: task'),
+    labels: z.array(z.string()).optional().describe('Labels to attach to the issue'),
+  },
+  async (args) => {
+    const params: Record<string, unknown> = { title: args.title };
+    if (args.description) params.description = args.description;
+    if (args.priority) params.priority = args.priority;
+    if (args.issue_type) params.issue_type = args.issue_type;
+    if (args.labels) params.labels = args.labels;
+    const result = await queryKernel('create_issue', params);
+    return { content: [{ type: 'text' as const, text: result }] };
+  },
+);
+
+server.tool(
+  'demarch_update_issue',
+  'Update an existing work item (bead). Only provided fields are changed.',
+  {
+    id: z.string().describe('Bead ID to update (required, e.g., "beads-abc123")'),
+    status: z.string().optional().describe('New status: open, in_progress, closed'),
+    priority: z.string().optional().describe('New priority: 0-4'),
+    title: z.string().optional().describe('New title'),
+    description: z.string().optional().describe('New description'),
+    notes: z.string().optional().describe('Append notes to the issue'),
+  },
+  async (args) => {
+    const params: Record<string, unknown> = { id: args.id };
+    if (args.status) params.status = args.status;
+    if (args.priority) params.priority = args.priority;
+    if (args.title) params.title = args.title;
+    if (args.description) params.description = args.description;
+    if (args.notes) params.notes = args.notes;
+    const result = await queryKernel('update_issue', params);
+    return { content: [{ type: 'text' as const, text: result }] };
+  },
+);
+
+server.tool(
+  'demarch_close_issue',
+  'Close a work item (bead), marking it as completed.',
+  {
+    id: z.string().describe('Bead ID to close (required)'),
+    reason: z.string().optional().describe('Reason for closing (e.g., "completed", "duplicate")'),
+  },
+  async (args) => {
+    const params: Record<string, unknown> = { id: args.id };
+    if (args.reason) params.reason = args.reason;
+    const result = await queryKernel('close_issue', params);
+    return { content: [{ type: 'text' as const, text: result }] };
+  },
+);
+
+server.tool(
+  'demarch_start_run',
+  'Start a new sprint/run in the Demarch kernel. This is a policy-governing action that may require human confirmation.',
+  {
+    title: z.string().optional().describe('Title for the new run'),
+    description: z.string().optional().describe('Description of the run goals'),
+  },
+  async (args) => {
+    const params: Record<string, unknown> = {};
+    if (args.title) params.title = args.title;
+    if (args.description) params.description = args.description;
+    const result = await queryKernel('start_run', params);
+    return { content: [{ type: 'text' as const, text: result }] };
+  },
+);
+
+server.tool(
+  'demarch_approve_gate',
+  'Approve or advance a gate in the current sprint. This is a policy-governing action that may require human confirmation.',
+  {
+    gate_id: z.string().describe('Gate ID to approve (required)'),
+    reason: z.string().optional().describe('Reason for approval'),
+  },
+  async (args) => {
+    const params: Record<string, unknown> = { gate_id: args.gate_id };
+    if (args.reason) params.reason = args.reason;
+    const result = await queryKernel('approve_gate', params);
+    return { content: [{ type: 'text' as const, text: result }] };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

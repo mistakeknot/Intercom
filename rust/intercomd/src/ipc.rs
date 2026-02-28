@@ -50,6 +50,18 @@ pub trait IpcDelegate: Send + Sync {
     /// Send a message to a chat JID via the messaging channel.
     fn send_message(&self, chat_jid: &str, text: &str, sender: Option<&str>);
 
+    /// Send a message with optional inline keyboard buttons.
+    /// Default implementation ignores buttons and sends plain text.
+    fn send_message_with_buttons(
+        &self,
+        chat_jid: &str,
+        text: &str,
+        sender: Option<&str>,
+        _reply_markup: Option<crate::telegram::InlineKeyboardMarkup>,
+    ) {
+        self.send_message(chat_jid, text, sender);
+    }
+
     /// Forward a task command to the Node host for processing.
     fn forward_task(&self, task: &IpcTask, group_folder: &str, is_main: bool);
 }

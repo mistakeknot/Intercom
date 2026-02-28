@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
 use crate::ipc::IpcDelegate;
+use crate::telegram::{InlineKeyboardButton, InlineKeyboardMarkup};
 
 /// Configuration for the event consumer loop.
 #[derive(Debug, Clone)]
@@ -56,6 +57,26 @@ pub struct KernelEvent {
     #[serde(flatten)]
     pub extra: serde_json::Value,
 }
+
+/// A formatted notification with optional inline keyboard buttons.
+struct Notification {
+    text: String,
+    buttons: Option<InlineKeyboardMarkup>,
+}
+
+/// Build inline keyboard for gate approval.
+/// TODO(iv-followup): Add Reject/Defer buttons once WriteOperation variants exist.
+fn gate_approval_buttons(gate_id: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup {
+        inline_keyboard: vec![vec![InlineKeyboardButton {
+            text: "✅ Approve".to_string(),
+            callback_data: format!("approve:{gate_id}"),
+        }]],
+    }
+}
+
+// TODO(iv-followup): Add budget_action_buttons once ExtendBudget/CancelRun
+// WriteOperation variants exist. Budget notifications are text-only for now.
 
 /// The event consumer. Polls for kernel events and sends notifications.
 pub struct EventConsumer {
@@ -147,9 +168,18 @@ impl EventConsumer {
         debug!(count = events.len(), "Processing kernel events");
 
         for event in &events {
-            if let Some(message) = self.format_notification(event) {
-                self.delegate
-                    .send_message(notification_jid, &message, Some("Intercom"));
+            if let Some(notif) = self.format_notification(event) {
+                if notif.buttons.is_some() {
+                    self.delegate.send_message_with_buttons(
+                        notification_jid,
+                        &notif.text,
+                        Some("Intercom"),
+                        notif.buttons,
+                    );
+                } else {
+                    self.delegate
+                        .send_message(notification_jid, &notif.text, Some("Intercom"));
+                }
             }
 
             // Advance cursor
@@ -159,9 +189,9 @@ impl EventConsumer {
         }
     }
 
-    /// Format a kernel event into a human-readable notification.
+    /// Format a kernel event into a notification with optional inline buttons.
     /// Returns None for events we don't care about.
-    fn format_notification(&self, event: &KernelEvent) -> Option<String> {
+    fn format_notification(&self, event: &KernelEvent) -> Option<Notification> {
         let kind = event
             .kind
             .as_deref()
@@ -172,29 +202,40 @@ impl EventConsumer {
             "gate.pending" | "gate_pending" => {
                 let gate_id = event.gate_id.as_deref().unwrap_or("unknown");
                 let run_id = event.run_id.as_deref().unwrap_or("?");
-                Some(format!(
-                    "Gate approval needed\n\n\
-                     Gate: {gate_id}\n\
-                     Run: {run_id}\n\n\
-                     Reply APPROVE {gate_id} or REJECT {gate_id}"
-                ))
+                Some(Notification {
+                    text: format!(
+                        "🚪 Gate approval needed\n\n\
+                         Gate: {gate_id}\n\
+                         Run: {run_id}"
+                    ),
+                    buttons: Some(gate_approval_buttons(gate_id)),
+                })
             }
             "run.completed" | "run_completed" => {
                 let run_id = event.run_id.as_deref().unwrap_or("?");
                 let reason = event.reason.as_deref().unwrap_or("completed normally");
-                Some(format!("Run {run_id} completed: {reason}"))
+                Some(Notification {
+                    text: format!("✅ Run {run_id} completed: {reason}"),
+                    buttons: None,
+                })
             }
             "budget.exceeded" | "budget_exceeded" => {
                 let run_id = event.run_id.as_deref().unwrap_or("?");
-                Some(format!(
-                    "Budget alert for run {run_id}\n\n\
-                     Token budget exceeded. Reply EXTEND {run_id} or CANCEL {run_id}"
-                ))
+                Some(Notification {
+                    text: format!(
+                        "💰 Budget alert for run {run_id}\n\n\
+                         Token budget exceeded."
+                    ),
+                    buttons: None,
+                })
             }
             "phase.changed" | "phase_changed" => {
                 let run_id = event.run_id.as_deref().unwrap_or("?");
                 let phase = event.phase.as_deref().unwrap_or("?");
-                Some(format!("Run {run_id} phase changed to: {phase}"))
+                Some(Notification {
+                    text: format!("📋 Run {run_id} phase → {phase}"),
+                    buttons: None,
+                })
             }
             _ => {
                 debug!(kind, "Skipping unhandled event type");
@@ -233,12 +274,15 @@ mod tests {
             Arc::new(crate::ipc::LogOnlyDelegate),
         );
 
-        let msg = consumer
+        let notif = consumer
             .format_notification(&test_event("gate.pending"))
             .unwrap();
-        assert!(msg.contains("Gate approval needed"));
-        assert!(msg.contains("gate-review"));
-        assert!(msg.contains("APPROVE"));
+        assert!(notif.text.contains("Gate approval needed"));
+        assert!(notif.text.contains("gate-review"));
+        assert!(notif.buttons.is_some());
+        let buttons = notif.buttons.unwrap();
+        assert_eq!(buttons.inline_keyboard[0].len(), 1);
+        assert_eq!(buttons.inline_keyboard[0][0].callback_data, "approve:gate-review");
     }
 
     #[test]
@@ -252,11 +296,12 @@ mod tests {
             Arc::new(crate::ipc::LogOnlyDelegate),
         );
 
-        let msg = consumer
+        let notif = consumer
             .format_notification(&test_event("run.completed"))
             .unwrap();
-        assert!(msg.contains("abc123"));
-        assert!(msg.contains("all tasks done"));
+        assert!(notif.text.contains("abc123"));
+        assert!(notif.text.contains("all tasks done"));
+        assert!(notif.buttons.is_none());
     }
 
     #[test]
@@ -270,11 +315,11 @@ mod tests {
             Arc::new(crate::ipc::LogOnlyDelegate),
         );
 
-        let msg = consumer
+        let notif = consumer
             .format_notification(&test_event("budget.exceeded"))
             .unwrap();
-        assert!(msg.contains("Budget alert"));
-        assert!(msg.contains("EXTEND"));
+        assert!(notif.text.contains("Budget alert"));
+        assert!(notif.buttons.is_none());
     }
 
     #[test]
@@ -288,10 +333,11 @@ mod tests {
             Arc::new(crate::ipc::LogOnlyDelegate),
         );
 
-        let msg = consumer
+        let notif = consumer
             .format_notification(&test_event("phase.changed"))
             .unwrap();
-        assert!(msg.contains("execute"));
+        assert!(notif.text.contains("execute"));
+        assert!(notif.buttons.is_none());
     }
 
     #[test]
@@ -308,6 +354,14 @@ mod tests {
         assert!(consumer
             .format_notification(&test_event("some.random.event"))
             .is_none());
+    }
+
+    #[test]
+    fn gate_buttons_have_correct_callback_data() {
+        let buttons = gate_approval_buttons("gate-review");
+        assert_eq!(buttons.inline_keyboard.len(), 1);
+        assert_eq!(buttons.inline_keyboard[0].len(), 1);
+        assert_eq!(buttons.inline_keyboard[0][0].callback_data, "approve:gate-review");
     }
 
     #[test]

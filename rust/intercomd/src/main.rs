@@ -30,8 +30,9 @@ use intercom_core::{
 };
 use serde::{Deserialize, Serialize};
 use telegram::{
-    TelegramBridge, TelegramEditRequest, TelegramEditResponse, TelegramIngressRequest,
-    TelegramIngressResponse, TelegramSendRequest, TelegramSendResponse,
+    TelegramBridge, TelegramCallbackRequest, TelegramCallbackResponse, TelegramEditRequest,
+    TelegramEditResponse, TelegramIngressRequest, TelegramIngressResponse, TelegramSendRequest,
+    TelegramSendResponse,
 };
 use tokio::sync::RwLock;
 use tracing::info;
@@ -459,6 +460,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         .route("/v1/telegram/ingress", post(telegram_ingress))
         .route("/v1/telegram/send", post(telegram_send))
         .route("/v1/telegram/edit", post(telegram_edit))
+        .route("/v1/telegram/callback", post(telegram_callback))
         .route("/v1/commands", post(handle_slash_command))
         .nest("/v1/db", db_routes)
         .with_state(state);
@@ -658,6 +660,22 @@ async fn telegram_edit(
     match state.telegram.edit_message(request).await {
         Ok(response) => Json(response),
         Err(err) => Json(TelegramEditResponse::from_error(err.to_string())),
+    }
+}
+
+async fn telegram_callback(
+    State(state): State<AppState>,
+    Json(request): Json<TelegramCallbackRequest>,
+) -> Json<TelegramCallbackResponse> {
+    match state.telegram.handle_callback(request, &state.demarch).await {
+        Ok(response) => Json(response),
+        Err(err) => Json(TelegramCallbackResponse {
+            ok: false,
+            action: String::new(),
+            target_id: String::new(),
+            result: None,
+            error: Some(err.to_string()),
+        }),
     }
 }
 

@@ -164,6 +164,25 @@ function handleNextWork(_params: Record<string, unknown>): QueryResponse {
   return { status: 'ok', result };
 }
 
+function handleResearch(params: Record<string, unknown>): QueryResponse {
+  if (!isCliAvailable('ic')) return { status: 'error', result: STANDALONE_MSG };
+
+  const query = params.query as string | undefined;
+  if (!query) {
+    return { status: 'error', result: 'research requires a query parameter' };
+  }
+
+  const args = ['discovery', 'search', '--json', query];
+  const result = execCli('ic', args);
+  if (result === null) {
+    return {
+      status: 'error',
+      result: 'Research tool not available — ic discovery subcommand may not exist yet.',
+    };
+  }
+  return { status: 'ok', result };
+}
+
 function handleRunEvents(params: Record<string, unknown>): QueryResponse {
   if (!isCliAvailable('ic')) return { status: 'error', result: STANDALONE_MSG };
 
@@ -206,6 +225,8 @@ export function handleQuery(
       return handleNextWork(params);
     case 'run_events':
       return handleRunEvents(params);
+    case 'research':
+      return handleResearch(params);
     default:
       return { status: 'error', result: `Unknown query type: ${type}` };
   }

@@ -89,6 +89,48 @@ pub struct TelegramEditResponse {
     pub parity_max_chars: usize,
 }
 
+/// Inline keyboard button for Telegram Bot API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InlineKeyboardButton {
+    pub text: String,
+    pub callback_data: String,
+}
+
+/// Inline keyboard markup (array of button rows).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InlineKeyboardMarkup {
+    pub inline_keyboard: Vec<Vec<InlineKeyboardButton>>,
+}
+
+/// Extended send request with optional inline keyboard.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TelegramSendWithButtonsRequest {
+    pub jid: String,
+    pub text: String,
+    #[serde(default)]
+    pub reply_markup: Option<InlineKeyboardMarkup>,
+}
+
+/// Incoming callback query from Telegram (button press).
+#[derive(Debug, Clone, Deserialize)]
+pub struct TelegramCallbackRequest {
+    pub callback_query_id: String,
+    pub chat_jid: String,
+    pub message_id: String,
+    pub sender_id: Option<String>,
+    pub sender_name: Option<String>,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TelegramCallbackResponse {
+    pub ok: bool,
+    pub action: String,
+    pub target_id: String,
+    pub result: Option<String>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct TelegramApiEnvelope {
     ok: bool,
@@ -325,6 +367,208 @@ impl TelegramBridge {
             error: None,
             truncated,
             parity_max_chars: TELEGRAM_MAX_TEXT_CHARS,
+        })
+    }
+
+    /// Send a message with optional inline keyboard buttons.
+    /// Falls back to plain send_message if reply_markup is None.
+    pub async fn send_message_with_buttons(
+        &self,
+        request: TelegramSendWithButtonsRequest,
+    ) -> anyhow::Result<TelegramSendResponse> {
+        if request.reply_markup.is_none() {
+            return self
+                .send_message(TelegramSendRequest {
+                    jid: request.jid,
+                    text: request.text,
+                })
+                .await;
+        }
+
+        let token = self
+            .bot_token
+            .as_ref()
+            .ok_or_else(|| anyhow!("TELEGRAM_BOT_TOKEN is not set for intercomd"))?;
+
+        let chat_id = normalize_chat_id(&request.jid);
+        let endpoint = format!("{TELEGRAM_API_BASE}/bot{token}/sendMessage");
+
+        let mut body = serde_json::json!({
+            "chat_id": chat_id,
+            "text": &request.text,
+        });
+        if let Some(markup) = &request.reply_markup {
+            body["reply_markup"] = serde_json::to_value(markup)
+                .context("failed to serialize InlineKeyboardMarkup")?;
+        }
+
+        let response = self
+            .client
+            .post(&endpoint)
+            .json(&body)
+            .send()
+            .await
+            .context("failed to call Telegram sendMessage")?;
+
+        let envelope: TelegramApiEnvelope = response
+            .json()
+            .await
+            .context("failed to parse Telegram sendMessage response")?;
+        if !envelope.ok {
+            return Err(anyhow!(envelope.description.unwrap_or_else(|| {
+                "Telegram sendMessage returned ok=false".to_string()
+            })));
+        }
+
+        let message_id = envelope
+            .result
+            .as_ref()
+            .and_then(|v| v.get("message_id"))
+            .and_then(|v| v.as_i64())
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+
+        Ok(TelegramSendResponse {
+            ok: true,
+            error: None,
+            message_ids: vec![message_id],
+            chunks_planned: 1,
+            chunks_sent: 1,
+            chunk_lengths: vec![request.text.chars().count()],
+            parity: TelegramSendParity {
+                max_chars_per_chunk: TELEGRAM_MAX_TEXT_CHARS,
+                all_chunks_within_limit: request.text.chars().count() <= TELEGRAM_MAX_TEXT_CHARS,
+            },
+        })
+    }
+
+    /// Answer a Telegram callback query (acknowledge button press).
+    pub async fn answer_callback_query(
+        &self,
+        callback_query_id: &str,
+        text: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let token = self
+            .bot_token
+            .as_ref()
+            .ok_or_else(|| anyhow!("TELEGRAM_BOT_TOKEN is not set for intercomd"))?;
+
+        let endpoint = format!("{TELEGRAM_API_BASE}/bot{token}/answerCallbackQuery");
+        let mut body = serde_json::json!({
+            "callback_query_id": callback_query_id,
+        });
+        if let Some(t) = text {
+            body["text"] = serde_json::json!(t);
+        }
+
+        self.client
+            .post(&endpoint)
+            .json(&body)
+            .send()
+            .await
+            .context("failed to call Telegram answerCallbackQuery")?;
+
+        Ok(())
+    }
+
+    /// Handle a callback query from an inline keyboard button press.
+    /// Parses the callback data, routes to the appropriate Demarch write operation,
+    /// edits the original message with the result, and answers the callback.
+    pub async fn handle_callback(
+        &self,
+        request: TelegramCallbackRequest,
+        demarch: &intercom_core::DemarchAdapter,
+    ) -> anyhow::Result<TelegramCallbackResponse> {
+        let parts: Vec<&str> = request.data.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            self.answer_callback_query(&request.callback_query_id, Some("Invalid action"))
+                .await?;
+            return Ok(TelegramCallbackResponse {
+                ok: false,
+                action: request.data.clone(),
+                target_id: String::new(),
+                result: None,
+                error: Some("Invalid callback data format".to_string()),
+            });
+        }
+
+        let action = parts[0];
+        let target_id = parts[1].to_string();
+        let sender = request.sender_name.as_deref().unwrap_or("unknown");
+
+        let (write_result, status_text) = match action {
+            "approve" => {
+                let resp = demarch.execute_write(
+                    intercom_core::WriteOperation::ApproveGate {
+                        gate_id: Some(target_id.clone()),
+                        reason: Some(format!("Approved by {sender} via Telegram")),
+                    },
+                    true,
+                );
+                let ok = resp.status == intercom_core::DemarchStatus::Ok;
+                let status = if ok {
+                    format!("✅ Gate {target_id} approved by @{sender}")
+                } else {
+                    format!("❌ Failed: {}", resp.result)
+                };
+                (resp.result, status)
+            }
+            // TODO(iv-followup): reject/defer/extend/cancel need dedicated WriteOperation
+            // variants in intercom-core. Until then, return explicit "not yet implemented"
+            // errors so users get clear feedback instead of silent no-ops.
+            "reject" | "defer" | "extend" | "cancel" => {
+                let label = match action {
+                    "reject" => "Gate rejection",
+                    "defer" => "Gate deferral",
+                    "extend" => "Budget extension",
+                    "cancel" => "Run cancellation",
+                    _ => unreachable!(),
+                };
+                self.answer_callback_query(
+                    &request.callback_query_id,
+                    Some(&format!("{label} not yet implemented")),
+                )
+                .await?;
+                return Ok(TelegramCallbackResponse {
+                    ok: false,
+                    action: action.to_string(),
+                    target_id,
+                    result: None,
+                    error: Some(format!("{label} is not yet implemented — use `ic gate` CLI directly")),
+                });
+            }
+            _ => {
+                self.answer_callback_query(&request.callback_query_id, Some("Unknown action"))
+                    .await?;
+                return Ok(TelegramCallbackResponse {
+                    ok: false,
+                    action: action.to_string(),
+                    target_id,
+                    result: None,
+                    error: Some(format!("Unknown callback action: {action}")),
+                });
+            }
+        };
+
+        // Edit the original message to show result (removes buttons)
+        let _ = self
+            .edit_message(TelegramEditRequest {
+                jid: request.chat_jid.clone(),
+                message_id: request.message_id.clone(),
+                text: status_text.clone(),
+            })
+            .await;
+
+        // Answer the callback query (dismisses loading spinner)
+        self.answer_callback_query(&request.callback_query_id, Some(&status_text))
+            .await?;
+
+        Ok(TelegramCallbackResponse {
+            ok: true,
+            action: action.to_string(),
+            target_id,
+            result: Some(write_result),
+            error: None,
         })
     }
 
@@ -701,5 +945,44 @@ mod tests {
         assert_eq!(response.reason.as_deref(), Some("trigger_required"));
         assert_eq!(response.runtime.as_deref(), Some("gemini"));
         assert_eq!(response.model.as_deref(), Some("gemini-3.1-pro"));
+    }
+
+    #[test]
+    fn parses_approve_callback_data() {
+        let data = "approve:gate-review";
+        let parts: Vec<&str> = data.splitn(2, ':').collect();
+        assert_eq!(parts[0], "approve");
+        assert_eq!(parts[1], "gate-review");
+    }
+
+    #[test]
+    fn parses_callback_with_colons_in_id() {
+        let data = "approve:gate:with:colons";
+        let parts: Vec<&str> = data.splitn(2, ':').collect();
+        assert_eq!(parts[0], "approve");
+        assert_eq!(parts[1], "gate:with:colons");
+    }
+
+    #[test]
+    fn rejects_invalid_callback_data() {
+        let data = "nocolon";
+        let parts: Vec<&str> = data.splitn(2, ':').collect();
+        assert_eq!(parts.len(), 1);
+    }
+
+    #[test]
+    fn inline_keyboard_serializes_correctly() {
+        let markup = InlineKeyboardMarkup {
+            inline_keyboard: vec![vec![InlineKeyboardButton {
+                text: "OK".to_string(),
+                callback_data: "ok:1".to_string(),
+            }]],
+        };
+        let json = serde_json::to_value(&markup).unwrap();
+        assert_eq!(json["inline_keyboard"][0][0]["text"].as_str(), Some("OK"));
+        assert_eq!(
+            json["inline_keyboard"][0][0]["callback_data"].as_str(),
+            Some("ok:1")
+        );
     }
 }

@@ -3,6 +3,7 @@ import { Bot } from 'grammy';
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import {
   editTelegramViaIntercomd,
+  routeTelegramCallback,
   routeTelegramIngress,
   sendTelegramViaIntercomd,
 } from '../intercomd-client.js';
@@ -264,6 +265,43 @@ export class TelegramChannel implements Channel {
     });
     this.bot.on('message:location', async (ctx) => await storeNonText(ctx, '[Location]'));
     this.bot.on('message:contact', async (ctx) => await storeNonText(ctx, '[Contact]'));
+
+    // Handle inline keyboard callback queries (gate approvals, budget actions)
+    this.bot.on('callback_query:data', async (ctx) => {
+      const chatJid = `tg:${ctx.chat?.id ?? ctx.callbackQuery.message?.chat.id}`;
+      const messageId = ctx.callbackQuery.message?.message_id?.toString() ?? '';
+      const data = ctx.callbackQuery.data;
+
+      const result = await routeTelegramCallback({
+        callback_query_id: ctx.callbackQuery.id,
+        chat_jid: chatJid,
+        message_id: messageId,
+        sender_id: ctx.from?.id?.toString(),
+        sender_name: ctx.from?.first_name || ctx.from?.username,
+        data,
+      });
+
+      if (!result) {
+        // intercomd unavailable — answer the callback to dismiss the spinner
+        await ctx.answerCallbackQuery({ text: 'Service unavailable, try again later.' });
+        return;
+      }
+
+      if (!result.ok) {
+        logger.warn(
+          { chatJid, data, error: result.error },
+          'Callback query failed in intercomd',
+        );
+        await ctx.answerCallbackQuery({ text: result.error || 'Action failed' });
+        return;
+      }
+
+      logger.info(
+        { chatJid, action: result.action, target: result.target_id },
+        'Callback query handled by intercomd',
+      );
+      // intercomd already answered the callback query and edited the message
+    });
 
     // Handle errors gracefully
     this.bot.catch((err) => {

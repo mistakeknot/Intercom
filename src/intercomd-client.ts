@@ -110,3 +110,26 @@ export function editTelegramViaIntercomd(
 ): Promise<TelegramEditResponse | null> {
   return postJson<TelegramEditResponse>('/v1/telegram/edit', request);
 }
+
+export interface TelegramCallbackRequest {
+  callback_query_id: string;
+  chat_jid: string;
+  message_id: string;
+  sender_id?: string;
+  sender_name?: string;
+  data: string;
+}
+
+export interface TelegramCallbackResponse {
+  ok: boolean;
+  action: string;
+  target_id: string;
+  result?: string | null;
+  error?: string | null;
+}
+
+export function routeTelegramCallback(
+  request: TelegramCallbackRequest,
+): Promise<TelegramCallbackResponse | null> {
+  return postJson<TelegramCallbackResponse>('/v1/telegram/callback', request);
+}
