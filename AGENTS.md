@@ -22,7 +22,7 @@ If a high-value change conflicts with philosophy, either:
 - create follow-up work to update `PHILOSOPHY.md` explicitly.
 
 
-Multi-runtime personal AI assistant with container isolation and messaging integration. Two runtimes: **NanoClaw** (Node.js host) and **IronClaw** (Rust daemon), running together in a strangler-fig migration pattern.
+Multi-runtime personal AI assistant with container isolation and messaging integration. Dual-process architecture: **Node host** (channels, commands, host callback) and **IronClaw** (Rust daemon `intercomd`, orchestration, container dispatch, scheduling, Postgres persistence).
 
 ## Architecture Overview
 
@@ -30,10 +30,10 @@ Multi-runtime personal AI assistant with container isolation and messaging integ
 Telegram / WhatsApp
         |
         v
-   Node Host (NanoClaw)                    Rust Daemon (IronClaw)
+   Node Host (channel layer)               Rust Daemon (IronClaw)
    ├── channels/telegram.ts                ├── telegram.rs          (Telegram bridge API)
    ├── channels/whatsapp.ts                ├── ipc.rs               (IPC watcher + delegation)
-   ├── index.ts (orchestrator)             ├── events.rs            (kernel event consumer)
+   ├── index.ts (channels + commands)      ├── events.rs            (kernel event consumer)
    ├── container-runner.ts                 ├── commands.rs          (slash command handler)
    ├── host-callback.ts ◄─── HTTP ───────►├── process_group.rs     (container orchestrator)
    ├── intercomd-client.ts ──── HTTP ─────►├── container/runner.rs  (async container spawning)
@@ -43,26 +43,26 @@ Telegram / WhatsApp
         |                                          |
         v                                          v
    Docker Container (one per active conversation)
-   ├── Claude runtime     → nanoclaw-agent:latest
-   ├── Gemini runtime     → nanoclaw-agent-gemini:latest
-   └── Codex runtime      → nanoclaw-agent-codex:latest
+   ├── Claude runtime     → intercom-agent:latest
+   ├── Gemini runtime     → intercom-agent-gemini:latest
+   └── Codex runtime      → intercom-agent-codex:latest
 ```
 
-**Strangler-fig pattern**: intercomd runs alongside Node. IPC polling, Demarch queries, Telegram bridge, event notifications, and slash commands are handled natively in Rust. Message sending and task management are delegated back to Node via HTTP callbacks. When `orchestrator.enabled=true`, Rust handles the full message loop, container spawning, and scheduling — bypassing Node for those paths.
+**IronClaw architecture**: intercomd is the orchestrator — handles the full message loop, container spawning, scheduling, and Telegram bridge natively in Rust. Node serves as the channel layer: receives messages from WhatsApp/Telegram, routes commands, and delegates container spawning back to intercomd via HTTP callbacks. The `orchestrator.enabled` flag in `intercom.toml` controls whether Rust runs the message loop (default: `true`).
 
 ## Multi-Runtime System
 
 ### Runtime Selection
 
-Default runtime set via `NANOCLAW_RUNTIME` env var (values: `claude`, `gemini`, `codex`). Per-group override via `runtime` field on `RegisteredGroup`. Resolution: `group.runtime || DEFAULT_RUNTIME`.
+Default runtime set via `INTERCOM_RUNTIME` env var (values: `claude`, `gemini`, `codex`). Per-group override via `runtime` field on `RegisteredGroup`. Resolution: `group.runtime || DEFAULT_RUNTIME`.
 
 ### Container Images
 
 | Runtime | Image | Backend | Auth |
 |---------|-------|---------|------|
-| claude | `nanoclaw-agent:latest` | Claude Agent SDK | `CLAUDE_CODE_OAUTH_TOKEN` |
-| gemini | `nanoclaw-agent-gemini:latest` | Code Assist API (`cloudcode-pa.googleapis.com`) | `GEMINI_REFRESH_TOKEN`, `GEMINI_OAUTH_CLIENT_ID`, `GEMINI_OAUTH_CLIENT_SECRET` |
-| codex | `nanoclaw-agent-codex:latest` | `codex exec` CLI | `CODEX_OAUTH_ACCESS_TOKEN`, `CODEX_OAUTH_REFRESH_TOKEN`, `CODEX_OAUTH_ID_TOKEN`, `CODEX_OAUTH_ACCOUNT_ID` |
+| claude | `intercom-agent:latest` | Claude Agent SDK | `CLAUDE_CODE_OAUTH_TOKEN` |
+| gemini | `intercom-agent-gemini:latest` | Code Assist API (`cloudcode-pa.googleapis.com`) | `GEMINI_REFRESH_TOKEN`, `GEMINI_OAUTH_CLIENT_ID`, `GEMINI_OAUTH_CLIENT_SECRET` |
+| codex | `intercom-agent-codex:latest` | `codex exec` CLI | `CODEX_OAUTH_ACCESS_TOKEN`, `CODEX_OAUTH_REFRESH_TOKEN`, `CODEX_OAUTH_ID_TOKEN`, `CODEX_OAUTH_ACCOUNT_ID` |
 
 ### Container Protocol
 
@@ -72,9 +72,9 @@ All containers speak the same stdin/stdout protocol:
 
 **Output** — JSON wrapped in sentinel markers on stdout:
 ```
----NANOCLAW_OUTPUT_START---
+---INTERCOM_OUTPUT_START---
 {"status":"success","result":"response text","newSessionId":"...","event":{...}}
----NANOCLAW_OUTPUT_END---
+---INTERCOM_OUTPUT_END---
 ```
 
 **Stream events**: `event` field carries `tool_start` (toolName, toolInput) and `text_delta` (text) for real-time streaming to Telegram via `StreamAccumulator`.
@@ -201,7 +201,7 @@ cd container && bash build.sh latest <runtime>  # claude, gemini, codex, or all
 
 ### Rust-to-Node Wiring
 
-Set `INTERCOM_ENGINE=rust` in `.env` to enable the Rust bridge. Node routes Telegram ingress/egress through intercomd with automatic fallback if unavailable. The host callback server starts on `HOST_CALLBACK_PORT` (default 7341).
+Rust orchestration is always active (`orchestrator.enabled=true` in `intercom.toml`). Node routes Telegram ingress/egress through intercomd unconditionally with automatic fallback if unavailable. The host callback server starts on `HOST_CALLBACK_PORT` (default 7341).
 
 ## File Reference
 
