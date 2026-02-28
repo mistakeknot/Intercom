@@ -48,7 +48,7 @@ Telegram / WhatsApp
    └── Codex runtime      → intercom-agent-codex:latest
 ```
 
-**IronClaw architecture**: intercomd is the orchestrator — handles the full message loop, container spawning, scheduling, and Telegram bridge natively in Rust. Node serves as the channel layer: receives messages from WhatsApp/Telegram, routes commands, and delegates container spawning back to intercomd via HTTP callbacks. The `orchestrator.enabled` flag in `intercom.toml` controls whether Rust runs the message loop (default: `true`).
+**IronClaw architecture**: intercomd handles the Telegram bridge, IPC watcher, event consumer, and (when enabled) the full message loop with container spawning and scheduling. Node serves as the channel layer: receives messages from WhatsApp/Telegram, routes commands, and delegates container spawning back to intercomd via HTTP callbacks. The `orchestrator.enabled` flag in `intercom.toml` controls whether Rust runs the message loop (default: `false` — Node orchestrates until Rust orchestrator is validated).
 
 ## Multi-Runtime System
 
@@ -201,7 +201,7 @@ cd container && bash build.sh latest <runtime>  # claude, gemini, codex, or all
 
 ### Rust-to-Node Wiring
 
-Rust orchestration is always active (`orchestrator.enabled=true` in `intercom.toml`). Node routes Telegram ingress/egress through intercomd unconditionally with automatic fallback if unavailable. The host callback server starts on `HOST_CALLBACK_PORT` (default 7341).
+Rust orchestration is controlled by `orchestrator.enabled` in `intercom.toml` (currently `false` — Node orchestrates). The Telegram bridge, IPC watcher, and event consumer run in intercomd regardless of this flag. Node routes Telegram ingress/egress through intercomd unconditionally with automatic fallback if unavailable. The host callback server starts on `HOST_CALLBACK_PORT` (default 7341).
 
 ## File Reference
 
