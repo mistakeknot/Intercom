@@ -220,7 +220,7 @@ pub fn container_name(group_folder: &str) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    format!("nanoclaw-{}-{}", safe_name, now)
+    format!("intercom-{}-{}", safe_name, now)
 }
 
 #[cfg(test)]
@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn container_name_sanitizes_folder() {
         let name = container_name("team.eng/special");
-        assert!(name.starts_with("nanoclaw-team-eng-special-"));
+        assert!(name.starts_with("intercom-team-eng-special-"));
         assert!(!name.contains('.'));
         assert!(!name.contains('/'));
     }

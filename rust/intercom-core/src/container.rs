@@ -13,8 +13,8 @@ use crate::runtime::RuntimeKind;
 
 /// Sentinel markers for robust output parsing.
 /// Must match the constants in container agent-runner code.
-pub const OUTPUT_START_MARKER: &str = "---NANOCLAW_OUTPUT_START---";
-pub const OUTPUT_END_MARKER: &str = "---NANOCLAW_OUTPUT_END---";
+pub const OUTPUT_START_MARKER: &str = "---INTERCOM_OUTPUT_START---";
+pub const OUTPUT_END_MARKER: &str = "---INTERCOM_OUTPUT_END---";
 
 /// Input payload written to container stdin as JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,9 +92,9 @@ pub struct VolumeMount {
 /// Container image names keyed by runtime.
 pub fn container_image(runtime: RuntimeKind) -> &'static str {
     match runtime {
-        RuntimeKind::Claude => "nanoclaw-agent:latest",
-        RuntimeKind::Gemini => "nanoclaw-agent-gemini:latest",
-        RuntimeKind::Codex => "nanoclaw-agent-codex:latest",
+        RuntimeKind::Claude => "intercom-agent:latest",
+        RuntimeKind::Gemini => "intercom-agent-gemini:latest",
+        RuntimeKind::Codex => "intercom-agent-codex:latest",
     }
 }
 
@@ -265,9 +265,9 @@ mod tests {
 
     #[test]
     fn container_image_names() {
-        assert_eq!(container_image(RuntimeKind::Claude), "nanoclaw-agent:latest");
-        assert_eq!(container_image(RuntimeKind::Gemini), "nanoclaw-agent-gemini:latest");
-        assert_eq!(container_image(RuntimeKind::Codex), "nanoclaw-agent-codex:latest");
+        assert_eq!(container_image(RuntimeKind::Claude), "intercom-agent:latest");
+        assert_eq!(container_image(RuntimeKind::Gemini), "intercom-agent-gemini:latest");
+        assert_eq!(container_image(RuntimeKind::Codex), "intercom-agent-codex:latest");
     }
 
     #[test]

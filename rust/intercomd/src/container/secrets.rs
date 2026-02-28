@@ -242,7 +242,7 @@ mod tests {
             },
         ];
 
-        let args = build_container_args(&mounts, "test-container", "nanoclaw-agent:latest", "UTC");
+        let args = build_container_args(&mounts, "test-container", "intercom-agent:latest", "UTC");
 
         assert!(args.contains(&"-i".to_string()));
         assert!(args.contains(&"--rm".to_string()));
@@ -252,6 +252,6 @@ mod tests {
         assert!(args.contains(&"/home/mk/project:/workspace/project:ro".to_string()));
         assert!(args.contains(&"/home/mk/data:/workspace/group".to_string()));
         assert!(args.contains(&"type=tmpfs,destination=/workspace/project/node_modules,tmpfs-size=0".to_string()));
-        assert!(args.last() == Some(&"nanoclaw-agent:latest".to_string()));
+        assert!(args.last() == Some(&"intercom-agent:latest".to_string()));
     }
 }

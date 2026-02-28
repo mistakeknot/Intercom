@@ -633,7 +633,7 @@ pub async fn ensure_runtime_available() -> anyhow::Result<()> {
 /// Kill orphaned intercom containers from previous runs.
 pub async fn cleanup_orphans() {
     let output = match Command::new(CONTAINER_RUNTIME_BIN)
-        .args(["ps", "--filter", "name=nanoclaw-", "--format", "{{.Names}}"])
+        .args(["ps", "--filter", "name=intercom-", "--format", "{{.Names}}"])
         .output()
         .await
     {

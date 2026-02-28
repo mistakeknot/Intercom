@@ -1,6 +1,6 @@
 import { Bot } from 'grammy';
 
-import { ASSISTANT_NAME, INTERCOM_ENGINE, TRIGGER_PATTERN } from '../config.js';
+import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import {
   editTelegramViaIntercomd,
   routeTelegramIngress,
@@ -121,41 +121,39 @@ export class TelegramChannel implements Channel {
       }
 
       let routedByRust = false;
-      if (INTERCOM_ENGINE === 'rust') {
-        const routed = await routeTelegramIngress({
-          chat_jid: chatJid,
-          chat_name: chatName,
-          chat_type: chatType,
-          message_id: msgId,
-          sender_id: sender,
-          sender_name: senderName,
-          content,
-          timestamp,
-          persist: false,
-        });
+      const routed = await routeTelegramIngress({
+        chat_jid: chatJid,
+        chat_name: chatName,
+        chat_type: chatType,
+        message_id: msgId,
+        sender_id: sender,
+        sender_name: senderName,
+        content,
+        timestamp,
+        persist: false,
+      });
 
-        if (routed) {
-          routedByRust = true;
-          if (!routed.accepted) {
-            logger.debug(
-              { chatJid, reason: routed.reason ?? 'rejected' },
-              'intercomd rejected Telegram ingress',
-            );
-            return;
-          }
-          if (routed.normalized_content) {
-            content = routed.normalized_content;
-          }
-          if (routed.parity.runtime_fallback_used) {
-            logger.warn(
-              {
-                chatJid,
-                runtime: routed.runtime,
-                model: routed.model,
-              },
-              'intercomd runtime profile fallback used for Telegram ingress',
-            );
-          }
+      if (routed) {
+        routedByRust = true;
+        if (!routed.accepted) {
+          logger.debug(
+            { chatJid, reason: routed.reason ?? 'rejected' },
+            'intercomd rejected Telegram ingress',
+          );
+          return;
+        }
+        if (routed.normalized_content) {
+          content = routed.normalized_content;
+        }
+        if (routed.parity.runtime_fallback_used) {
+          logger.warn(
+            {
+              chatJid,
+              runtime: routed.runtime,
+              model: routed.model,
+            },
+            'intercomd runtime profile fallback used for Telegram ingress',
+          );
         }
       }
 
@@ -216,23 +214,21 @@ export class TelegramChannel implements Channel {
       const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
       const content = `${placeholder}${caption}`;
 
-      if (INTERCOM_ENGINE === 'rust') {
-        const routed = await routeTelegramIngress({
-          chat_jid: chatJid,
-          chat_name:
-            ctx.chat.type === 'private'
-              ? senderName
-              : (ctx.chat as any).title || chatJid,
-          chat_type: ctx.chat.type,
-          message_id: ctx.message.message_id.toString(),
-          sender_id: ctx.from?.id?.toString() || '',
-          sender_name: senderName,
-          content,
-          timestamp,
-          persist: false,
-        });
-        if (routed && !routed.accepted) return;
-      }
+      const routed = await routeTelegramIngress({
+        chat_jid: chatJid,
+        chat_name:
+          ctx.chat.type === 'private'
+            ? senderName
+            : (ctx.chat as any).title || chatJid,
+        chat_type: ctx.chat.type,
+        message_id: ctx.message.message_id.toString(),
+        sender_id: ctx.from?.id?.toString() || '',
+        sender_name: senderName,
+        content,
+        timestamp,
+        persist: false,
+      });
+      if (routed && !routed.accepted) return;
 
       this.opts.onChatMetadata(
         chatJid,
@@ -303,21 +299,19 @@ export class TelegramChannel implements Channel {
   }
 
   async sendMessage(jid: string, text: string): Promise<void> {
-    if (INTERCOM_ENGINE === 'rust') {
-      const routed = await sendTelegramViaIntercomd({ jid, text });
-      if (routed?.ok) {
-        logger.info(
-          { jid, length: text.length, chunks: routed.chunks_sent },
-          'Telegram message sent via intercomd',
-        );
-        return;
-      }
-      if (routed && !routed.ok) {
-        logger.warn(
-          { jid, error: routed.error },
-          'intercomd send failed, falling back to Node Telegram client',
-        );
-      }
+    const routed = await sendTelegramViaIntercomd({ jid, text });
+    if (routed?.ok) {
+      logger.info(
+        { jid, length: text.length, chunks: routed.chunks_sent },
+        'Telegram message sent via intercomd',
+      );
+      return;
+    }
+    if (routed && !routed.ok) {
+      logger.warn(
+        { jid, error: routed.error },
+        'intercomd send failed, falling back to Node Telegram client',
+      );
     }
 
     if (!this.bot) {
@@ -373,17 +367,15 @@ export class TelegramChannel implements Channel {
   }
 
   async sendMessageWithId(jid: string, text: string): Promise<string | null> {
-    if (INTERCOM_ENGINE === 'rust') {
-      const routed = await sendTelegramViaIntercomd({ jid, text });
-      if (routed?.ok) {
-        return routed.message_ids[0] || null;
-      }
-      if (routed && !routed.ok) {
-        logger.warn(
-          { jid, error: routed.error },
-          'intercomd send-with-id failed, falling back to Node Telegram client',
-        );
-      }
+    const routed = await sendTelegramViaIntercomd({ jid, text });
+    if (routed?.ok) {
+      return routed.message_ids[0] || null;
+    }
+    if (routed && !routed.ok) {
+      logger.warn(
+        { jid, error: routed.error },
+        'intercomd send-with-id failed, falling back to Node Telegram client',
+      );
     }
 
     if (!this.bot) return null;
@@ -399,21 +391,19 @@ export class TelegramChannel implements Channel {
   }
 
   async editMessage(jid: string, messageId: string, text: string): Promise<boolean> {
-    if (INTERCOM_ENGINE === 'rust') {
-      const routed = await editTelegramViaIntercomd({
-        jid,
-        message_id: messageId,
-        text,
-      });
-      if (routed?.ok) {
-        return true;
-      }
-      if (routed && !routed.ok) {
-        logger.warn(
-          { jid, messageId, error: routed.error },
-          'intercomd edit failed, falling back to Node Telegram client',
-        );
-      }
+    const routed = await editTelegramViaIntercomd({
+      jid,
+      message_id: messageId,
+      text,
+    });
+    if (routed?.ok) {
+      return true;
+    }
+    if (routed && !routed.ok) {
+      logger.warn(
+        { jid, messageId, error: routed.error },
+        'intercomd edit failed, falling back to Node Telegram client',
+      );
     }
 
     if (!this.bot) return false;

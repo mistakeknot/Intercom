@@ -9,10 +9,9 @@ import { readEnvFile } from './env.js';
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
-  'INTERCOM_ENGINE',
   'INTERCOMD_URL',
   'HOST_CALLBACK_PORT',
-  'NANOCLAW_RUNTIME',
+  'INTERCOM_RUNTIME',
   'TELEGRAM_BOT_TOKEN',
   'TELEGRAM_ONLY',
 ]);
@@ -38,15 +37,6 @@ export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 export const MAIN_GROUP_FOLDER = 'main';
 
-export type ServiceEngine = 'node' | 'rust';
-export const INTERCOM_ENGINE: ServiceEngine =
-  (
-    process.env.INTERCOM_ENGINE ||
-    envConfig.INTERCOM_ENGINE ||
-    'node'
-  ).toLowerCase() === 'rust'
-    ? 'rust'
-    : 'node';
 export const INTERCOMD_URL =
   process.env.INTERCOMD_URL ||
   envConfig.INTERCOMD_URL ||
@@ -60,8 +50,8 @@ export const HOST_CALLBACK_PORT = parseInt(
 export type Runtime = 'claude' | 'gemini' | 'codex';
 
 export const DEFAULT_RUNTIME: Runtime =
-  (process.env.NANOCLAW_RUNTIME as Runtime) ||
-  (envConfig.NANOCLAW_RUNTIME as Runtime) ||
+  (process.env.INTERCOM_RUNTIME as Runtime) ||
+  (envConfig.INTERCOM_RUNTIME as Runtime) ||
   'claude';
 
 // --- Model catalog ---
@@ -118,9 +108,9 @@ export function runtimeForModel(modelId: string): Runtime {
 }
 
 export const CONTAINER_IMAGES: Record<Runtime, string> = {
-  claude: process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest',
-  gemini: process.env.CONTAINER_IMAGE_GEMINI || 'nanoclaw-agent-gemini:latest',
-  codex: process.env.CONTAINER_IMAGE_CODEX || 'nanoclaw-agent-codex:latest',
+  claude: process.env.CONTAINER_IMAGE || 'intercom-agent:latest',
+  gemini: process.env.CONTAINER_IMAGE_GEMINI || 'intercom-agent-gemini:latest',
+  codex: process.env.CONTAINER_IMAGE_CODEX || 'intercom-agent-codex:latest',
 };
 
 // Legacy single image reference (for backward compat)

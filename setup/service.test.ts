@@ -19,7 +19,7 @@ function generatePlist(nodePath: string, projectRoot: string, homeDir: string): 
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.nanoclaw</string>
+    <string>com.intercom</string>
     <key>ProgramArguments</key>
     <array>
         <string>${nodePath}</string>
@@ -39,9 +39,9 @@ function generatePlist(nodePath: string, projectRoot: string, homeDir: string): 
         <string>${homeDir}</string>
     </dict>
     <key>StandardOutPath</key>
-    <string>${projectRoot}/logs/nanoclaw.log</string>
+    <string>${projectRoot}/logs/intercom.log</string>
     <key>StandardErrorPath</key>
-    <string>${projectRoot}/logs/nanoclaw.error.log</string>
+    <string>${projectRoot}/logs/intercom.error.log</string>
 </dict>
 </plist>`;
 }
@@ -53,7 +53,7 @@ function generateSystemdUnit(
   isSystem: boolean,
 ): string {
   return `[Unit]
-Description=NanoClaw Personal Assistant
+Description=Intercom Personal Assistant
 After=network.target
 
 [Service]
@@ -64,8 +64,8 @@ Restart=always
 RestartSec=5
 Environment=HOME=${homeDir}
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin
-StandardOutput=append:${projectRoot}/logs/nanoclaw.log
-StandardError=append:${projectRoot}/logs/nanoclaw.error.log
+StandardOutput=append:${projectRoot}/logs/intercom.log
+StandardError=append:${projectRoot}/logs/intercom.error.log
 
 [Install]
 WantedBy=${isSystem ? 'multi-user.target' : 'default.target'}`;
@@ -73,99 +73,82 @@ WantedBy=${isSystem ? 'multi-user.target' : 'default.target'}`;
 
 describe('plist generation', () => {
   it('contains the correct label', () => {
-    const plist = generatePlist('/usr/local/bin/node', '/home/user/nanoclaw', '/home/user');
-    expect(plist).toContain('<string>com.nanoclaw</string>');
+    const plist = generatePlist('/usr/local/bin/node', '/home/user/intercom', '/home/user');
+    expect(plist).toContain('<string>com.intercom</string>');
   });
 
   it('uses the correct node path', () => {
-    const plist = generatePlist('/opt/node/bin/node', '/home/user/nanoclaw', '/home/user');
+    const plist = generatePlist('/opt/node/bin/node', '/home/user/intercom', '/home/user');
     expect(plist).toContain('<string>/opt/node/bin/node</string>');
   });
 
   it('points to dist/index.js', () => {
-    const plist = generatePlist('/usr/local/bin/node', '/home/user/nanoclaw', '/home/user');
-    expect(plist).toContain('/home/user/nanoclaw/dist/index.js');
+    const plist = generatePlist('/usr/local/bin/node', '/home/user/intercom', '/home/user');
+    expect(plist).toContain('/home/user/intercom/dist/index.js');
   });
 
   it('sets log paths', () => {
-    const plist = generatePlist('/usr/local/bin/node', '/home/user/nanoclaw', '/home/user');
-    expect(plist).toContain('nanoclaw.log');
-    expect(plist).toContain('nanoclaw.error.log');
+    const plist = generatePlist('/usr/local/bin/node', '/home/user/intercom', '/home/user');
+    expect(plist).toContain('intercom.log');
+    expect(plist).toContain('intercom.error.log');
   });
 });
 
 describe('systemd unit generation', () => {
   it('user unit uses default.target', () => {
-    const unit = generateSystemdUnit('/usr/bin/node', '/home/user/nanoclaw', '/home/user', false);
+    const unit = generateSystemdUnit('/usr/bin/node', '/home/user/intercom', '/home/user', false);
     expect(unit).toContain('WantedBy=default.target');
   });
 
   it('system unit uses multi-user.target', () => {
-    const unit = generateSystemdUnit('/usr/bin/node', '/home/user/nanoclaw', '/home/user', true);
+    const unit = generateSystemdUnit('/usr/bin/node', '/home/user/intercom', '/home/user', true);
     expect(unit).toContain('WantedBy=multi-user.target');
   });
 
   it('contains restart policy', () => {
-    const unit = generateSystemdUnit('/usr/bin/node', '/home/user/nanoclaw', '/home/user', false);
+    const unit = generateSystemdUnit('/usr/bin/node', '/home/user/intercom', '/home/user', false);
     expect(unit).toContain('Restart=always');
     expect(unit).toContain('RestartSec=5');
   });
 
   it('sets correct ExecStart', () => {
-    const unit = generateSystemdUnit('/usr/bin/node', '/srv/nanoclaw', '/home/user', false);
-    expect(unit).toContain('ExecStart=/usr/bin/node /srv/nanoclaw/dist/index.js');
+    const unit = generateSystemdUnit('/usr/bin/node', '/srv/intercom', '/home/user', false);
+    expect(unit).toContain('ExecStart=/usr/bin/node /srv/intercom/dist/index.js');
   });
 });
 
 describe('WSL nohup fallback', () => {
   it('generates a valid wrapper script', () => {
-    const projectRoot = '/home/user/nanoclaw';
+    const projectRoot = '/home/user/intercom';
     const nodePath = '/usr/bin/node';
-    const pidFile = path.join(projectRoot, 'nanoclaw.pid');
+    const pidFile = path.join(projectRoot, 'intercom.pid');
 
     // Simulate what service.ts generates
     const wrapper = `#!/bin/bash
 set -euo pipefail
 cd ${JSON.stringify(projectRoot)}
-nohup ${JSON.stringify(nodePath)} ${JSON.stringify(projectRoot)}/dist/index.js >> ${JSON.stringify(projectRoot)}/logs/nanoclaw.log 2>> ${JSON.stringify(projectRoot)}/logs/nanoclaw.error.log &
+nohup ${JSON.stringify(nodePath)} ${JSON.stringify(projectRoot)}/dist/index.js >> ${JSON.stringify(projectRoot)}/logs/intercom.log 2>> ${JSON.stringify(projectRoot)}/logs/intercom.error.log &
 echo $! > ${JSON.stringify(pidFile)}`;
 
     expect(wrapper).toContain('#!/bin/bash');
     expect(wrapper).toContain('nohup');
     expect(wrapper).toContain(nodePath);
-    expect(wrapper).toContain('nanoclaw.pid');
+    expect(wrapper).toContain('intercom.pid');
   });
 });
 
 describe('service command selection', () => {
-  it('defaults to node engine', () => {
-    const original = process.env.INTERCOM_ENGINE;
-    delete process.env.INTERCOM_ENGINE;
-
+  it('returns node engine with correct args', () => {
     const command = _resolveServiceCommand('/tmp/intercom', '/usr/bin/node');
     expect(command.engine).toBe('node');
     expect(command.executable).toBe('/usr/bin/node');
     expect(command.args).toContain('/tmp/intercom/dist/index.js');
-
-    if (original !== undefined) process.env.INTERCOM_ENGINE = original;
   });
 
-  it('uses rust engine when requested and binary exists', () => {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'intercom-rust-test-'));
-    const rustBin = path.join(tmp, 'rust', 'target', 'release', 'intercomd');
-    fs.mkdirSync(path.dirname(rustBin), { recursive: true });
-    fs.writeFileSync(rustBin, '#!/bin/sh\n', { mode: 0o755 });
-
-    const original = process.env.INTERCOM_ENGINE;
-    process.env.INTERCOM_ENGINE = 'rust';
-
-    const command = _resolveServiceCommand(tmp, '/usr/bin/node');
-    expect(command.engine).toBe('rust');
-    expect(command.executable).toBe(rustBin);
-    expect(command.args[0]).toBe('serve');
-
-    if (original !== undefined) process.env.INTERCOM_ENGINE = original;
-    else delete process.env.INTERCOM_ENGINE;
+  it('always uses node engine (intercomd has dedicated service unit)', () => {
+    const command = _resolveServiceCommand('/tmp/intercom', '/usr/bin/node');
+    expect(command.engine).toBe('node');
+    expect(command.executable).toBe('/usr/bin/node');
   });
 });
 

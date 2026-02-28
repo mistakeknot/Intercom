@@ -9,7 +9,6 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { readEnvFile } from '../src/env.js';
 import { logger } from '../src/logger.js';
 import {
   commandExists,
@@ -22,7 +21,7 @@ import {
 } from './platform.js';
 import { emitStatus } from './status.js';
 
-type ServiceEngine = 'node' | 'rust';
+type ServiceEngine = 'node';
 
 interface ServiceCommand {
   engine: ServiceEngine;
@@ -103,28 +102,7 @@ export async function run(_args: string[]): Promise<void> {
 }
 
 function resolveServiceCommand(projectRoot: string, nodePath: string): ServiceCommand {
-  const envConfig = readEnvFile(['INTERCOM_ENGINE']);
-  const requestedEngine = (
-    process.env.INTERCOM_ENGINE ||
-    envConfig.INTERCOM_ENGINE ||
-    'node'
-  ).toLowerCase();
-
-  const rustBinary = path.join(projectRoot, 'rust', 'target', 'release', 'intercomd');
-  if (requestedEngine === 'rust') {
-    if (fs.existsSync(rustBinary)) {
-      return {
-        engine: 'rust',
-        executable: rustBinary,
-        args: ['serve', '--config', path.join(projectRoot, 'config', 'intercom.toml')],
-      };
-    }
-    logger.warn(
-      { rustBinary },
-      'INTERCOM_ENGINE=rust requested but intercomd binary was not found; falling back to Node',
-    );
-  }
-
+  // Node host service — intercomd (Rust daemon) has its own dedicated service unit
   return {
     engine: 'node',
     executable: nodePath,
@@ -146,7 +124,7 @@ function setupLaunchd(
   homeDir: string,
   command: ServiceCommand,
 ): void {
-  const plistPath = path.join(homeDir, 'Library', 'LaunchAgents', 'com.nanoclaw.plist');
+  const plistPath = path.join(homeDir, 'Library', 'LaunchAgents', 'com.intercom.plist');
   fs.mkdirSync(path.dirname(plistPath), { recursive: true });
   const programArgs = [command.executable, ...command.args]
     .map((arg) => `        <string>${arg}</string>`)
@@ -157,7 +135,7 @@ function setupLaunchd(
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.nanoclaw</string>
+    <string>com.intercom</string>
     <key>ProgramArguments</key>
     <array>
 ${programArgs}
@@ -176,9 +154,9 @@ ${programArgs}
         <string>${homeDir}</string>
     </dict>
     <key>StandardOutPath</key>
-    <string>${projectRoot}/logs/nanoclaw.log</string>
+    <string>${projectRoot}/logs/intercom.log</string>
     <key>StandardErrorPath</key>
-    <string>${projectRoot}/logs/nanoclaw.error.log</string>
+    <string>${projectRoot}/logs/intercom.error.log</string>
 </dict>
 </plist>`;
 
@@ -196,7 +174,7 @@ ${programArgs}
   let serviceLoaded = false;
   try {
     const output = execSync('launchctl list', { encoding: 'utf-8' });
-    serviceLoaded = output.includes('com.nanoclaw');
+    serviceLoaded = output.includes('com.intercom');
   } catch {
     // launchctl list failed
   }
@@ -230,7 +208,7 @@ function setupLinux(
 }
 
 /**
- * Kill any orphaned nanoclaw node processes left from previous runs or debugging.
+ * Kill any orphaned intercom node processes left from previous runs or debugging.
  * Prevents WhatsApp "conflict" disconnects when two instances connect simultaneously.
  */
 function killOrphanedProcesses(projectRoot: string): void {
@@ -238,7 +216,7 @@ function killOrphanedProcesses(projectRoot: string): void {
     execSync(`pkill -f '${projectRoot}/dist/index\\.js' || true`, {
       stdio: 'ignore',
     });
-    logger.info('Stopped any orphaned nanoclaw processes');
+    logger.info('Stopped any orphaned intercom processes');
   } catch {
     // pkill not available or no orphans
   }
@@ -284,7 +262,7 @@ function setupSystemd(
   let systemctlPrefix: string;
 
   if (runningAsRoot) {
-    unitPath = '/etc/systemd/system/nanoclaw.service';
+    unitPath = '/etc/systemd/system/intercom.service';
     systemctlPrefix = 'systemctl';
     logger.info('Running as root — installing system-level systemd unit');
   } else {
@@ -298,12 +276,12 @@ function setupSystemd(
     }
     const unitDir = path.join(homeDir, '.config', 'systemd', 'user');
     fs.mkdirSync(unitDir, { recursive: true });
-    unitPath = path.join(unitDir, 'nanoclaw.service');
+    unitPath = path.join(unitDir, 'intercom.service');
     systemctlPrefix = 'systemctl --user';
   }
 
   const unit = `[Unit]
-Description=NanoClaw Personal Assistant
+Description=Intercom Personal Assistant
 After=network.target
 
 [Service]
@@ -314,8 +292,8 @@ Restart=always
 RestartSec=5
 Environment=HOME=${homeDir}
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin
-StandardOutput=append:${projectRoot}/logs/nanoclaw.log
-StandardError=append:${projectRoot}/logs/nanoclaw.error.log
+StandardOutput=append:${projectRoot}/logs/intercom.log
+StandardError=append:${projectRoot}/logs/intercom.error.log
 
 [Install]
 WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
@@ -331,7 +309,7 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
     );
   }
 
-  // Kill orphaned nanoclaw processes to avoid WhatsApp conflict errors
+  // Kill orphaned intercom processes to avoid WhatsApp conflict errors
   killOrphanedProcesses(projectRoot);
 
   // Enable and start
@@ -342,13 +320,13 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
   }
 
   try {
-    execSync(`${systemctlPrefix} enable nanoclaw`, { stdio: 'ignore' });
+    execSync(`${systemctlPrefix} enable intercom`, { stdio: 'ignore' });
   } catch (err) {
     logger.error({ err }, 'systemctl enable failed');
   }
 
   try {
-    execSync(`${systemctlPrefix} start nanoclaw`, { stdio: 'ignore' });
+    execSync(`${systemctlPrefix} start intercom`, { stdio: 'ignore' });
   } catch (err) {
     logger.error({ err }, 'systemctl start failed');
   }
@@ -356,7 +334,7 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
   // Verify
   let serviceLoaded = false;
   try {
-    execSync(`${systemctlPrefix} is-active nanoclaw`, { stdio: 'ignore' });
+    execSync(`${systemctlPrefix} is-active intercom`, { stdio: 'ignore' });
     serviceLoaded = true;
   } catch {
     // Not active
@@ -383,12 +361,12 @@ function setupNohupFallback(
 ): void {
   logger.warn('No systemd detected — generating nohup wrapper script');
 
-  const wrapperPath = path.join(projectRoot, 'start-nanoclaw.sh');
-  const pidFile = path.join(projectRoot, 'nanoclaw.pid');
+  const wrapperPath = path.join(projectRoot, 'start-intercom.sh');
+  const pidFile = path.join(projectRoot, 'intercom.pid');
 
   const lines = [
     '#!/bin/bash',
-    '# start-nanoclaw.sh — Start NanoClaw without systemd',
+    '# start-intercom.sh — Start Intercom without systemd',
     `# To stop: kill \\$(cat ${pidFile})`,
     '',
     'set -euo pipefail',
@@ -399,20 +377,20 @@ function setupNohupFallback(
     `if [ -f ${JSON.stringify(pidFile)} ]; then`,
     `  OLD_PID=$(cat ${JSON.stringify(pidFile)} 2>/dev/null || echo "")`,
     '  if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then',
-    '    echo "Stopping existing NanoClaw (PID $OLD_PID)..."',
+    '    echo "Stopping existing Intercom (PID $OLD_PID)..."',
     '    kill "$OLD_PID" 2>/dev/null || true',
     '    sleep 2',
     '  fi',
     'fi',
     '',
-    'echo "Starting NanoClaw..."',
+    'echo "Starting Intercom..."',
     `nohup ${JSON.stringify(command.executable)}${command.args.map((arg) => ` ${JSON.stringify(arg)}`).join('')} \\`,
-    `  >> ${JSON.stringify(projectRoot + '/logs/nanoclaw.log')} \\`,
-    `  2>> ${JSON.stringify(projectRoot + '/logs/nanoclaw.error.log')} &`,
+    `  >> ${JSON.stringify(projectRoot + '/logs/intercom.log')} \\`,
+    `  2>> ${JSON.stringify(projectRoot + '/logs/intercom.error.log')} &`,
     '',
     `echo $! > ${JSON.stringify(pidFile)}`,
-    'echo "NanoClaw started (PID $!)"',
-    `echo "Logs: tail -f ${projectRoot}/logs/nanoclaw.log"`,
+    'echo "Intercom started (PID $!)"',
+    `echo "Logs: tail -f ${projectRoot}/logs/intercom.log"`,
   ];
   const wrapper = lines.join('\n') + '\n';
 

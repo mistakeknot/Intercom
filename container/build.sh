@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build NanoClaw agent container images (all runtimes)
+# Build Intercom agent container images (all runtimes)
 #
 # Usage:
 #   ./build.sh              # Build all images with :latest tag
@@ -27,20 +27,20 @@ build_image() {
 }
 
 if [ "$RUNTIME" = "all" ] || [ "$RUNTIME" = "claude" ]; then
-  build_image "nanoclaw-agent" "Dockerfile"
+  build_image "intercom-agent" "Dockerfile"
 fi
 
 if [ "$RUNTIME" = "all" ] || [ "$RUNTIME" = "gemini" ]; then
-  build_image "nanoclaw-agent-gemini" "Dockerfile.gemini"
+  build_image "intercom-agent-gemini" "Dockerfile.gemini"
 fi
 
 if [ "$RUNTIME" = "all" ] || [ "$RUNTIME" = "codex" ]; then
-  build_image "nanoclaw-agent-codex" "Dockerfile.codex"
+  build_image "intercom-agent-codex" "Dockerfile.codex"
 fi
 
 echo ""
 echo "Build complete!"
 echo ""
 echo "Test with:"
-echo "  echo '{\"prompt\":\"What is 2+2?\",\"groupFolder\":\"test\",\"chatJid\":\"test@g.us\",\"isMain\":false}' | ${CONTAINER_RUNTIME} run -i nanoclaw-agent:${TAG}"
-echo "  echo '{\"prompt\":\"What is 2+2?\",\"groupFolder\":\"test\",\"chatJid\":\"test@g.us\",\"isMain\":false,\"secrets\":{\"GEMINI_REFRESH_TOKEN\":\"...\",\"GEMINI_OAUTH_CLIENT_ID\":\"...\",\"GEMINI_OAUTH_CLIENT_SECRET\":\"...\"}}' | ${CONTAINER_RUNTIME} run -i nanoclaw-agent-gemini:${TAG}"
+echo "  echo '{\"prompt\":\"What is 2+2?\",\"groupFolder\":\"test\",\"chatJid\":\"test@g.us\",\"isMain\":false}' | ${CONTAINER_RUNTIME} run -i intercom-agent:${TAG}"
+echo "  echo '{\"prompt\":\"What is 2+2?\",\"groupFolder\":\"test\",\"chatJid\":\"test@g.us\",\"isMain\":false,\"secrets\":{\"GEMINI_REFRESH_TOKEN\":\"...\",\"GEMINI_OAUTH_CLIENT_ID\":\"...\",\"GEMINI_OAUTH_CLIENT_SECRET\":\"...\"}}' | ${CONTAINER_RUNTIME} run -i intercom-agent-gemini:${TAG}"

@@ -64,7 +64,7 @@ export async function generateSummary(
     transcript,
   ].join('\n');
 
-  const outputFile = path.join(os.tmpdir(), `nanoclaw-summary-${Date.now()}.txt`);
+  const outputFile = path.join(os.tmpdir(), `intercom-summary-${Date.now()}.txt`);
 
   try {
     const summary = await runCodexExec(prompt, outputFile);

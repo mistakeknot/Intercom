@@ -3,22 +3,22 @@ import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
 
 // Sentinel markers must match container-runner.ts
-const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
-const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+const OUTPUT_START_MARKER = '---INTERCOM_OUTPUT_START---';
+const OUTPUT_END_MARKER = '---INTERCOM_OUTPUT_END---';
 
 // Mock config
 vi.mock('./config.js', () => ({
   CONTAINER_IMAGES: {
-    claude: 'nanoclaw-agent:latest',
-    gemini: 'nanoclaw-agent-gemini:latest',
-    codex: 'nanoclaw-agent-codex:latest',
+    claude: 'intercom-agent:latest',
+    gemini: 'intercom-agent-gemini:latest',
+    codex: 'intercom-agent-codex:latest',
   },
-  CONTAINER_IMAGE: 'nanoclaw-agent:latest',
+  CONTAINER_IMAGE: 'intercom-agent:latest',
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
   CONTAINER_TIMEOUT: 1800000, // 30min
-  DATA_DIR: '/tmp/nanoclaw-test-data',
+  DATA_DIR: '/tmp/intercom-test-data',
   DEFAULT_RUNTIME: 'claude',
-  GROUPS_DIR: '/tmp/nanoclaw-test-groups',
+  GROUPS_DIR: '/tmp/intercom-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
   TIMEZONE: 'America/Los_Angeles',
 }));

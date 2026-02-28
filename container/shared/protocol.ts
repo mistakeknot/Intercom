@@ -30,8 +30,8 @@ export interface ContainerOutput {
   event?: StreamEvent;
 }
 
-export const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
-export const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+export const OUTPUT_START_MARKER = '---INTERCOM_OUTPUT_START---';
+export const OUTPUT_END_MARKER = '---INTERCOM_OUTPUT_END---';
 
 export function writeOutput(output: ContainerOutput): void {
   console.log(OUTPUT_START_MARKER);

@@ -29,7 +29,7 @@ const QR_AUTH_TEMPLATE = `<!DOCTYPE html>
   <div class="instructions">Settings \\u2192 Linked Devices \\u2192 Link a Device</div>
 </div>
 <script>
-  var startKey = 'nanoclaw_qr_start';
+  var startKey = 'intercom_qr_start';
   var start = localStorage.getItem(startKey);
   if (!start) { start = Date.now().toString(); localStorage.setItem(startKey, start); }
   var elapsed = Math.floor((Date.now() - parseInt(start)) / 1000);
@@ -59,7 +59,7 @@ const SUCCESS_HTML = `<!DOCTYPE html>
   <h2>Connected to WhatsApp</h2>
   <p>You can close this tab.</p>
 </div>
-<script>localStorage.removeItem('nanoclaw_qr_start');</script>
+<script>localStorage.removeItem('intercom_qr_start');</script>
 </body></html>`;
 
 function parseArgs(args: string[]): { method: string; phone: string } {

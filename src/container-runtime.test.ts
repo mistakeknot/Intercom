@@ -40,8 +40,8 @@ describe('readonlyMountArgs', () => {
 
 describe('stopContainer', () => {
   it('returns stop command using CONTAINER_RUNTIME_BIN', () => {
-    expect(stopContainer('nanoclaw-test-123')).toBe(
-      `${CONTAINER_RUNTIME_BIN} stop nanoclaw-test-123`,
+    expect(stopContainer('intercom-test-123')).toBe(
+      `${CONTAINER_RUNTIME_BIN} stop intercom-test-123`,
     );
   });
 });
@@ -79,7 +79,7 @@ describe('ensureContainerRuntimeRunning', () => {
 describe('cleanupOrphans', () => {
   it('stops orphaned nanoclaw containers', () => {
     // docker ps returns container names, one per line
-    mockExecSync.mockReturnValueOnce('nanoclaw-group1-111\nnanoclaw-group2-222\n');
+    mockExecSync.mockReturnValueOnce('intercom-group1-111\nintercom-group2-222\n');
     // stop calls succeed
     mockExecSync.mockReturnValue('');
 
@@ -89,16 +89,16 @@ describe('cleanupOrphans', () => {
     expect(mockExecSync).toHaveBeenCalledTimes(3);
     expect(mockExecSync).toHaveBeenNthCalledWith(
       2,
-      `${CONTAINER_RUNTIME_BIN} stop nanoclaw-group1-111`,
+      `${CONTAINER_RUNTIME_BIN} stop intercom-group1-111`,
       { stdio: 'pipe' },
     );
     expect(mockExecSync).toHaveBeenNthCalledWith(
       3,
-      `${CONTAINER_RUNTIME_BIN} stop nanoclaw-group2-222`,
+      `${CONTAINER_RUNTIME_BIN} stop intercom-group2-222`,
       { stdio: 'pipe' },
     );
     expect(logger.info).toHaveBeenCalledWith(
-      { count: 2, names: ['nanoclaw-group1-111', 'nanoclaw-group2-222'] },
+      { count: 2, names: ['intercom-group1-111', 'intercom-group2-222'] },
       'Stopped orphaned containers',
     );
   });
@@ -126,7 +126,7 @@ describe('cleanupOrphans', () => {
   });
 
   it('continues stopping remaining containers when one stop fails', () => {
-    mockExecSync.mockReturnValueOnce('nanoclaw-a-1\nnanoclaw-b-2\n');
+    mockExecSync.mockReturnValueOnce('intercom-a-1\nintercom-b-2\n');
     // First stop fails
     mockExecSync.mockImplementationOnce(() => {
       throw new Error('already stopped');
@@ -138,7 +138,7 @@ describe('cleanupOrphans', () => {
 
     expect(mockExecSync).toHaveBeenCalledTimes(3);
     expect(logger.info).toHaveBeenCalledWith(
-      { count: 2, names: ['nanoclaw-a-1', 'nanoclaw-b-2'] },
+      { count: 2, names: ['intercom-a-1', 'intercom-b-2'] },
       'Stopped orphaned containers',
     );
   });
