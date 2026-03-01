@@ -163,11 +163,11 @@ pub async fn migrate_legacy_to_postgres(
     migrated.scheduled_tasks = migrate_scheduled_tasks(&sqlite, &tx).await?;
     migrated.task_run_logs = migrate_task_run_logs(&sqlite, &tx).await?;
 
-    let details = serde_json::to_string(&migrated)?;
+    let details: serde_json::Value = serde_json::to_value(&migrated)?;
     tx.execute(
         "\
         INSERT INTO intercom_migration_checkpoints (checkpoint_name, details)
-        VALUES ($1, $2::jsonb)
+        VALUES ($1, $2)
         ON CONFLICT (checkpoint_name)
         DO UPDATE SET completed_at = now(), details = EXCLUDED.details
         ",

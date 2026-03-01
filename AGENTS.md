@@ -48,7 +48,7 @@ Telegram / WhatsApp
    └── Codex runtime      → intercom-agent-codex:latest
 ```
 
-**IronClaw architecture**: intercomd handles the Telegram bridge, IPC watcher, event consumer, and (when enabled) the full message loop with container spawning and scheduling. Node serves as the channel layer: receives messages from WhatsApp/Telegram, routes commands, and delegates container spawning back to intercomd via HTTP callbacks. The `orchestrator.enabled` flag in `intercom.toml` controls whether Rust runs the message loop (default: `false` — Node orchestrates until Rust orchestrator is validated).
+**IronClaw architecture**: intercomd is the orchestrator — handles the full message loop, container spawning, scheduling, and Telegram bridge natively in Rust. Node serves as the channel layer: receives messages from WhatsApp/Telegram, routes commands, and delegates container spawning back to intercomd via HTTP callbacks. The `orchestrator.enabled` flag in `intercom.toml` controls whether Rust runs the message loop (requires Postgres; sidecar mode when disabled).
 
 ## Multi-Runtime System
 
@@ -201,7 +201,7 @@ cd container && bash build.sh latest <runtime>  # claude, gemini, codex, or all
 
 ### Rust-to-Node Wiring
 
-Rust orchestration is controlled by `orchestrator.enabled` in `intercom.toml` (currently `false` — Node orchestrates). The Telegram bridge, IPC watcher, and event consumer run in intercomd regardless of this flag. Node routes Telegram ingress/egress through intercomd unconditionally with automatic fallback if unavailable. The host callback server starts on `HOST_CALLBACK_PORT` (default 7341).
+Rust orchestration requires Postgres (`orchestrator.enabled=true` + `postgres_dsn` in `intercom.toml`). Postgres runs as a Docker container (`intercom-postgres`, port 5432, `--restart unless-stopped`, volume `intercom-pgdata`). Without Postgres, intercomd runs as a sidecar (Telegram bridge, IPC, events) and Node handles orchestration. Node routes Telegram ingress/egress through intercomd unconditionally with automatic fallback if unavailable. The host callback server starts on `HOST_CALLBACK_PORT` (default 7341).
 
 ## File Reference
 
@@ -291,7 +291,7 @@ Rust orchestration is controlled by `orchestrator.enabled` in `intercom.toml` (c
 - **Codex auth.json format**: Rust parser is strict — needs all four fields: `id_token`, `access_token`, `refresh_token`, `account_id`.
 - **Gemini thinking tokens**: Thinking parts (`thought: true`) count against maxOutputTokens and must be filtered from output.
 - **Service restart order**: intercomd must start before intercom (configured via systemd `Before=` directive).
-- **Orchestrator flag**: `orchestrator.enabled` defaults to false. When enabled, requires Postgres connection — logs a warning and disables itself if Postgres is unavailable.
+- **Orchestrator flag**: `orchestrator.enabled` is true in production. Requires Postgres connection (`intercom-postgres` Docker container). Logs a warning and disables itself if Postgres is unavailable.
 - **Build then restart**: Both `npm run build` and `cargo build` produce artifacts loaded only at process startup. Always restart the corresponding service after building.
 
 <!-- BEGIN BEADS INTEGRATION -->

@@ -52,8 +52,8 @@ batch_size = 20
 
 [orchestrator]
 # Enable the Rust orchestrator (message loop, queue, container dispatch).
-# When false, intercomd runs as a sidecar only — Node remains the orchestrator.
-enabled = false
+# Requires Postgres. When false, intercomd runs as a sidecar only — Node remains the orchestrator.
+enabled = true
 # Maximum concurrent containers across all groups.
 max_concurrent_containers = 3
 # Poll interval for the message loop (milliseconds).

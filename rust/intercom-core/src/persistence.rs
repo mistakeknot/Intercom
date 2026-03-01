@@ -287,7 +287,7 @@ impl PgPool {
                     .execute(
                         "\
                         INSERT INTO chats (jid, name, last_message_time, channel, is_group)
-                        VALUES ($1, $2, $3::timestamptz, $4, $5)
+                        VALUES ($1, $2, $3::text::timestamptz, $4, $5)
                         ON CONFLICT (jid) DO UPDATE SET
                           name = COALESCE(NULLIF(EXCLUDED.name, EXCLUDED.jid), chats.name),
                           last_message_time = GREATEST(chats.last_message_time, EXCLUDED.last_message_time),
@@ -314,7 +314,7 @@ impl PgPool {
                     .execute(
                         "\
                         INSERT INTO chats (jid, name, last_message_time)
-                        VALUES ($1, $2, $3::timestamptz)
+                        VALUES ($1, $2, $3::text::timestamptz)
                         ON CONFLICT (jid) DO UPDATE SET name = EXCLUDED.name
                         ",
                         &[&jid, &name, &now],
@@ -365,7 +365,7 @@ impl PgPool {
                     .execute(
                         "\
                         INSERT INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message)
-                        VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7, $8)
+                        VALUES ($1, $2, $3, $4, $5, $6::text::timestamptz, $7, $8)
                         ON CONFLICT (id, chat_jid) DO UPDATE SET
                           content = EXCLUDED.content,
                           is_bot_message = EXCLUDED.is_bot_message
@@ -437,7 +437,12 @@ impl PgPool {
         }
         self.with_client(|client| {
             let jids = jids.to_vec();
-            let last_timestamp = last_timestamp.to_string();
+            // Empty timestamp can't be cast to timestamptz — use epoch as sentinel
+            let last_timestamp = if last_timestamp.is_empty() {
+                "1970-01-01T00:00:00Z".to_string()
+            } else {
+                last_timestamp.to_string()
+            };
             let bot_prefix = format!("{}:%", bot_prefix);
             Box::pin(async move {
                 // Build dynamic IN clause
@@ -457,7 +462,7 @@ impl PgPool {
                 let sql = format!(
                     "SELECT id, chat_jid, sender, sender_name, content, timestamp \
                      FROM messages \
-                     WHERE timestamp > $1::timestamptz AND chat_jid IN ({}) \
+                     WHERE timestamp > $1::text::timestamptz AND chat_jid IN ({}) \
                        AND is_bot_message = FALSE AND content NOT LIKE ${} \
                        AND content != '' AND content IS NOT NULL \
                      ORDER BY timestamp",
@@ -507,7 +512,12 @@ impl PgPool {
     ) -> anyhow::Result<Vec<NewMessage>> {
         self.with_client(|client| {
             let chat_jid = chat_jid.to_string();
-            let since_timestamp = since_timestamp.to_string();
+            // Empty timestamp can't be cast to timestamptz — use epoch as sentinel
+            let since_timestamp = if since_timestamp.is_empty() {
+                "1970-01-01T00:00:00Z".to_string()
+            } else {
+                since_timestamp.to_string()
+            };
             let bot_prefix = format!("{}:%", bot_prefix);
             Box::pin(async move {
                 let rows = client
@@ -515,7 +525,7 @@ impl PgPool {
                         "\
                         SELECT id, chat_jid, sender, sender_name, content, timestamp
                         FROM messages
-                        WHERE chat_jid = $1 AND timestamp > $2::timestamptz
+                        WHERE chat_jid = $1 AND timestamp > $2::text::timestamptz
                           AND is_bot_message = FALSE AND content NOT LIKE $3
                           AND content != '' AND content IS NOT NULL
                         ORDER BY timestamp
@@ -555,7 +565,7 @@ impl PgPool {
                         "\
                         INSERT INTO scheduled_tasks
                           (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9, $10::timestamptz)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::text::timestamptz, $9, $10::text::timestamptz)
                         ",
                         &[
                             &task.id,
@@ -650,7 +660,7 @@ impl PgPool {
             idx += 1;
         }
         if let Some(ref next_run) = updates.next_run {
-            fields.push(format!("next_run = ${idx}::timestamptz"));
+            fields.push(format!("next_run = ${idx}::text::timestamptz"));
             params.push(next_run.clone());
             idx += 1;
         }
@@ -742,7 +752,7 @@ impl PgPool {
                     .execute(
                         "\
                         UPDATE scheduled_tasks
-                        SET next_run = $1::timestamptz, last_run = $2::timestamptz,
+                        SET next_run = $1::text::timestamptz, last_run = $2::text::timestamptz,
                             last_result = $3,
                             status = CASE WHEN $1 IS NULL THEN 'completed' ELSE status END
                         WHERE id = $4
@@ -766,7 +776,7 @@ impl PgPool {
                     .execute(
                         "\
                         INSERT INTO task_run_logs (task_id, run_at, duration_ms, status, result, error)
-                        VALUES ($1, $2::timestamptz, $3, $4, $5, $6)
+                        VALUES ($1, $2::text::timestamptz, $3, $4, $5, $6)
                         ",
                         &[
                             &log.task_id,
@@ -938,7 +948,7 @@ impl PgPool {
                         "\
                         INSERT INTO registered_groups
                           (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, runtime, model)
-                        VALUES ($1, $2, $3, $4, $5::timestamptz, $6, $7, $8, $9)
+                        VALUES ($1, $2, $3, $4, $5::text::timestamptz, $6, $7, $8, $9)
                         ON CONFLICT (jid) DO UPDATE SET
                           name = EXCLUDED.name,
                           folder = EXCLUDED.folder,
