@@ -91,4 +91,7 @@ write_allowlist = [
   "bd close --json",
   "ic gate override --json",
   "ic run create --json",
+  "ic state set --json",
+  "ic run set --json",
+  "ic run cancel --json",
 ]

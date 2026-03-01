@@ -92,6 +92,22 @@ pub enum WriteOperation {
         gate_id: Option<String>,
         reason: Option<String>,
     },
+    RejectGate {
+        gate_id: Option<String>,
+        reason: Option<String>,
+    },
+    DeferGate {
+        gate_id: Option<String>,
+        reason: Option<String>,
+    },
+    ExtendBudget {
+        run_id: String,
+        max_dispatches: Option<u32>,
+    },
+    CancelRun {
+        run_id: String,
+        reason: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +115,8 @@ pub struct DemarchCommandPlan {
     pub bin: &'static str,
     pub signature: &'static str,
     pub args: Vec<String>,
+    /// Optional stdin payload (e.g. for `ic state set` which reads JSON from stdin).
+    pub stdin: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -170,12 +188,14 @@ impl DemarchAdapter {
                     bin: "ic",
                     signature,
                     args,
+                    stdin: None,
                 })
             }
             ReadOperation::SprintPhase => Some(DemarchCommandPlan {
                 bin: "ic",
                 signature: "ic run phase --json",
                 args: vec!["run".to_string(), "phase".to_string(), "--json".to_string()],
+                stdin: None,
             }),
             ReadOperation::SearchBeads { id, query, status } => {
                 if let Some(id) = id {
@@ -183,6 +203,7 @@ impl DemarchAdapter {
                         bin: "bd",
                         signature: "bd show --json",
                         args: vec!["show".to_string(), id.clone(), "--json".to_string()],
+                        stdin: None,
                     });
                 }
 
@@ -198,6 +219,7 @@ impl DemarchAdapter {
                     bin: "bd",
                     signature: "bd list --json",
                     args,
+                    stdin: None,
                 })
             }
             ReadOperation::SpecLookup { artifact_id } => {
@@ -228,6 +250,7 @@ impl DemarchAdapter {
                     bin: "ic",
                     signature,
                     args,
+                    stdin: None,
                 })
             }
             ReadOperation::ReviewSummary => None,
@@ -235,6 +258,7 @@ impl DemarchAdapter {
                 bin: "bd",
                 signature: "bd ready --json",
                 args: vec!["ready".to_string(), "--json".to_string()],
+                stdin: None,
             }),
             ReadOperation::RunEvents { limit, since } => {
                 let mut args = vec![
@@ -252,6 +276,7 @@ impl DemarchAdapter {
                     bin: "ic",
                     signature: "ic events tail --consumer=intercom --json",
                     args,
+                    stdin: None,
                 })
             }
         }
@@ -295,6 +320,7 @@ impl DemarchAdapter {
                     bin: "bd",
                     signature: "bd create --json",
                     args,
+                    stdin: None,
                 }
             }
             WriteOperation::UpdateIssue {
@@ -331,6 +357,7 @@ impl DemarchAdapter {
                     bin: "bd",
                     signature: "bd update --json",
                     args,
+                    stdin: None,
                 }
             }
             WriteOperation::CloseIssue { id, reason } => {
@@ -344,6 +371,7 @@ impl DemarchAdapter {
                     bin: "bd",
                     signature: "bd close --json",
                     args,
+                    stdin: None,
                 }
             }
             WriteOperation::StartRun { title, description } => {
@@ -365,6 +393,7 @@ impl DemarchAdapter {
                     bin: "ic",
                     signature: "ic run create --json",
                     args,
+                    stdin: None,
                 }
             }
             WriteOperation::ApproveGate { gate_id, reason } => {
@@ -385,6 +414,104 @@ impl DemarchAdapter {
                     bin: "ic",
                     signature: "ic gate override --json",
                     args,
+                    stdin: None,
+                }
+            }
+            WriteOperation::RejectGate { gate_id, reason } => {
+                // Gate rejection = record decision via ic state set.
+                // The gate stays failed (no override). The state record
+                // provides audit trail visible to event consumers.
+                let scope = gate_id
+                    .as_deref()
+                    .unwrap_or("unknown")
+                    .to_string();
+                let reason_text = reason
+                    .as_deref()
+                    .unwrap_or("Rejected via Intercom");
+                let payload = serde_json::json!({
+                    "action": "reject",
+                    "reason": reason_text,
+                })
+                .to_string();
+
+                DemarchCommandPlan {
+                    bin: "ic",
+                    signature: "ic state set --json",
+                    args: vec![
+                        "state".to_string(),
+                        "set".to_string(),
+                        "gate-decision".to_string(),
+                        scope,
+                        "--json".to_string(),
+                    ],
+                    stdin: Some(payload),
+                }
+            }
+            WriteOperation::DeferGate { gate_id, reason } => {
+                let scope = gate_id
+                    .as_deref()
+                    .unwrap_or("unknown")
+                    .to_string();
+                let reason_text = reason
+                    .as_deref()
+                    .unwrap_or("Deferred via Intercom");
+                let payload = serde_json::json!({
+                    "action": "defer",
+                    "reason": reason_text,
+                })
+                .to_string();
+
+                DemarchCommandPlan {
+                    bin: "ic",
+                    signature: "ic state set --json",
+                    args: vec![
+                        "state".to_string(),
+                        "set".to_string(),
+                        "gate-decision".to_string(),
+                        scope,
+                        "--json".to_string(),
+                    ],
+                    stdin: Some(payload),
+                }
+            }
+            WriteOperation::ExtendBudget {
+                run_id,
+                max_dispatches,
+            } => {
+                let mut args = vec![
+                    "run".to_string(),
+                    "set".to_string(),
+                    run_id.clone(),
+                    "--json".to_string(),
+                ];
+                if let Some(n) = max_dispatches {
+                    args.push(format!("--max-dispatches={n}"));
+                }
+
+                DemarchCommandPlan {
+                    bin: "ic",
+                    signature: "ic run set --json",
+                    args,
+                    stdin: None,
+                }
+            }
+            WriteOperation::CancelRun { run_id, reason } => {
+                let mut args = vec![
+                    "run".to_string(),
+                    "cancel".to_string(),
+                    run_id.clone(),
+                    "--json".to_string(),
+                ];
+                if let Some(reason) = reason {
+                    args.push("--reason".to_string());
+                    args.push(reason.clone());
+                }
+
+                DemarchCommandPlan {
+                    bin: "ic",
+                    signature: "ic run cancel --json",
+                    args,
+                    stdin: None,
                 }
             }
         }
@@ -403,7 +530,7 @@ impl DemarchAdapter {
             return DemarchResponse::error(STANDALONE_MSG);
         }
 
-        match self.exec_cli(plan.bin, &plan.args) {
+        match self.exec_cli(plan.bin, &plan.args, plan.stdin.as_deref()) {
             Ok(result) => DemarchResponse::ok(result),
             Err(err) => DemarchResponse::error(err.to_string()),
         }
@@ -419,12 +546,39 @@ impl DemarchAdapter {
         allowlist.iter().any(|allowed| allowed == signature)
     }
 
-    fn exec_cli(&self, bin: &str, args: &[String]) -> anyhow::Result<String> {
-        let output = Command::new(bin)
-            .args(args)
-            .current_dir(&self.project_root)
-            .output()
-            .with_context(|| format!("failed to execute {} with args {:?}", bin, args))?;
+    fn exec_cli(
+        &self,
+        bin: &str,
+        args: &[String],
+        stdin_data: Option<&str>,
+    ) -> anyhow::Result<String> {
+        use std::process::Stdio;
+
+        let mut cmd = Command::new(bin);
+        cmd.args(args).current_dir(&self.project_root);
+
+        if stdin_data.is_some() {
+            cmd.stdin(Stdio::piped());
+        }
+
+        let mut child = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to spawn {} with args {:?}", bin, args))?;
+
+        if let Some(data) = stdin_data {
+            use std::io::Write;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(data.as_bytes())
+                    .with_context(|| format!("failed to write stdin to {}", bin))?;
+            }
+        }
+
+        let output = child
+            .wait_with_output()
+            .with_context(|| format!("failed to wait for {} with args {:?}", bin, args))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if output.status.success() {
@@ -553,5 +707,91 @@ mod tests {
         assert_eq!(plan.signature, "ic events tail --consumer=intercom --json");
         assert!(plan.args.contains(&"--consumer=intercom".to_string()));
         assert!(plan.args.contains(&"--limit=20".to_string()));
+    }
+
+    #[test]
+    fn reject_gate_plan_uses_state_set_with_stdin() {
+        let plan = DemarchAdapter::plan_write(&WriteOperation::RejectGate {
+            gate_id: Some("gate-review".to_string()),
+            reason: Some("Not ready".to_string()),
+        });
+
+        assert_eq!(plan.bin, "ic");
+        assert_eq!(plan.signature, "ic state set --json");
+        assert!(plan.args.contains(&"gate-decision".to_string()));
+        assert!(plan.args.contains(&"gate-review".to_string()));
+        let stdin = plan.stdin.expect("stdin should be set");
+        assert!(stdin.contains("\"action\":\"reject\""));
+        assert!(stdin.contains("Not ready"));
+    }
+
+    #[test]
+    fn defer_gate_plan_uses_state_set_with_stdin() {
+        let plan = DemarchAdapter::plan_write(&WriteOperation::DeferGate {
+            gate_id: Some("gate-ship".to_string()),
+            reason: None,
+        });
+
+        assert_eq!(plan.bin, "ic");
+        assert_eq!(plan.signature, "ic state set --json");
+        let stdin = plan.stdin.expect("stdin should be set");
+        assert!(stdin.contains("\"action\":\"defer\""));
+        assert!(stdin.contains("Deferred via Intercom"));
+    }
+
+    #[test]
+    fn extend_budget_plan_uses_run_set() {
+        let plan = DemarchAdapter::plan_write(&WriteOperation::ExtendBudget {
+            run_id: "run-abc".to_string(),
+            max_dispatches: Some(10),
+        });
+
+        assert_eq!(plan.bin, "ic");
+        assert_eq!(plan.signature, "ic run set --json");
+        assert!(plan.args.contains(&"run-abc".to_string()));
+        assert!(plan.args.contains(&"--max-dispatches=10".to_string()));
+        assert!(plan.stdin.is_none());
+    }
+
+    #[test]
+    fn cancel_run_plan_uses_run_cancel() {
+        let plan = DemarchAdapter::plan_write(&WriteOperation::CancelRun {
+            run_id: "run-xyz".to_string(),
+            reason: Some("User requested".to_string()),
+        });
+
+        assert_eq!(plan.bin, "ic");
+        assert_eq!(plan.signature, "ic run cancel --json");
+        assert!(plan.args.contains(&"run-xyz".to_string()));
+        assert!(plan.args.contains(&"--reason".to_string()));
+        assert!(plan.args.contains(&"User requested".to_string()));
+        assert!(plan.stdin.is_none());
+    }
+
+    #[test]
+    fn cancel_run_plan_without_reason() {
+        let plan = DemarchAdapter::plan_write(&WriteOperation::CancelRun {
+            run_id: "run-123".to_string(),
+            reason: None,
+        });
+
+        assert_eq!(plan.bin, "ic");
+        assert_eq!(plan.signature, "ic run cancel --json");
+        assert!(plan.args.contains(&"run-123".to_string()));
+        assert!(!plan.args.contains(&"--reason".to_string()));
+    }
+
+    #[test]
+    fn extend_budget_plan_without_max_dispatches() {
+        let plan = DemarchAdapter::plan_write(&WriteOperation::ExtendBudget {
+            run_id: "run-456".to_string(),
+            max_dispatches: None,
+        });
+
+        assert_eq!(plan.bin, "ic");
+        assert_eq!(plan.signature, "ic run set --json");
+        assert!(plan.args.contains(&"run-456".to_string()));
+        // Only run_id and --json, no --max-dispatches flag
+        assert_eq!(plan.args.len(), 4);
     }
 }

@@ -221,6 +221,9 @@ impl Default for DemarchConfig {
                 "bd close --json".to_string(),
                 "ic gate override --json".to_string(),
                 "ic run create --json".to_string(),
+                "ic state set --json".to_string(),
+                "ic run set --json".to_string(),
+                "ic run cancel --json".to_string(),
             ],
         }
     }

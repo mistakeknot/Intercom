@@ -537,29 +537,69 @@ impl TelegramBridge {
                 };
                 (resp.result, status)
             }
-            // TODO(iv-followup): reject/defer/extend/cancel need dedicated WriteOperation
-            // variants in intercom-core. Until then, return explicit "not yet implemented"
-            // errors so users get clear feedback instead of silent no-ops.
-            "reject" | "defer" | "extend" | "cancel" => {
-                let label = match action {
-                    "reject" => "Gate rejection",
-                    "defer" => "Gate deferral",
-                    "extend" => "Budget extension",
-                    "cancel" => "Run cancellation",
-                    _ => unreachable!(),
+            "reject" => {
+                let resp = demarch.execute_write(
+                    intercom_core::WriteOperation::RejectGate {
+                        gate_id: Some(target_id.clone()),
+                        reason: Some(format!("Rejected by {sender} via Telegram")),
+                    },
+                    is_main,
+                );
+                let ok = resp.status == intercom_core::DemarchStatus::Ok;
+                let status = if ok {
+                    format!("❌ Gate {target_id} rejected by @{sender}")
+                } else {
+                    format!("❌ Failed: {}", resp.result)
                 };
-                self.answer_callback_query(
-                    &request.callback_query_id,
-                    Some(&format!("{label} not yet implemented")),
-                )
-                .await?;
-                return Ok(TelegramCallbackResponse {
-                    ok: false,
-                    action: action.to_string(),
-                    target_id,
-                    result: None,
-                    error: Some(format!("{label} is not yet implemented — use `ic gate` CLI directly")),
-                });
+                (resp.result, status)
+            }
+            "defer" => {
+                let resp = demarch.execute_write(
+                    intercom_core::WriteOperation::DeferGate {
+                        gate_id: Some(target_id.clone()),
+                        reason: Some(format!("Deferred by {sender} via Telegram")),
+                    },
+                    is_main,
+                );
+                let ok = resp.status == intercom_core::DemarchStatus::Ok;
+                let status = if ok {
+                    format!("⏸️ Gate {target_id} deferred by @{sender}")
+                } else {
+                    format!("❌ Failed: {}", resp.result)
+                };
+                (resp.result, status)
+            }
+            "extend" => {
+                let resp = demarch.execute_write(
+                    intercom_core::WriteOperation::ExtendBudget {
+                        run_id: target_id.clone(),
+                        max_dispatches: None,
+                    },
+                    is_main,
+                );
+                let ok = resp.status == intercom_core::DemarchStatus::Ok;
+                let status = if ok {
+                    format!("💰 Budget extended for run {target_id} by @{sender}")
+                } else {
+                    format!("❌ Failed: {}", resp.result)
+                };
+                (resp.result, status)
+            }
+            "cancel" => {
+                let resp = demarch.execute_write(
+                    intercom_core::WriteOperation::CancelRun {
+                        run_id: target_id.clone(),
+                        reason: Some(format!("Cancelled by {sender} via Telegram")),
+                    },
+                    is_main,
+                );
+                let ok = resp.status == intercom_core::DemarchStatus::Ok;
+                let status = if ok {
+                    format!("🛑 Run {target_id} cancelled by @{sender}")
+                } else {
+                    format!("❌ Failed: {}", resp.result)
+                };
+                (resp.result, status)
             }
             _ => {
                 self.answer_callback_query(&request.callback_query_id, Some("Unknown action"))

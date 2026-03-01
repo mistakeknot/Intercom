@@ -64,19 +64,43 @@ struct Notification {
     buttons: Option<InlineKeyboardMarkup>,
 }
 
-/// Build inline keyboard for gate approval.
-/// TODO(iv-followup): Add Reject/Defer buttons once WriteOperation variants exist.
+/// Build inline keyboard for gate approval/rejection/deferral.
 fn gate_approval_buttons(gate_id: &str) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup {
-        inline_keyboard: vec![vec![InlineKeyboardButton {
-            text: "✅ Approve".to_string(),
-            callback_data: format!("approve:{gate_id}"),
-        }]],
+        inline_keyboard: vec![
+            vec![
+                InlineKeyboardButton {
+                    text: "✅ Approve".to_string(),
+                    callback_data: format!("approve:{gate_id}"),
+                },
+                InlineKeyboardButton {
+                    text: "❌ Reject".to_string(),
+                    callback_data: format!("reject:{gate_id}"),
+                },
+            ],
+            vec![InlineKeyboardButton {
+                text: "⏸️ Defer".to_string(),
+                callback_data: format!("defer:{gate_id}"),
+            }],
+        ],
     }
 }
 
-// TODO(iv-followup): Add budget_action_buttons once ExtendBudget/CancelRun
-// WriteOperation variants exist. Budget notifications are text-only for now.
+/// Build inline keyboard for budget exceeded actions.
+fn budget_action_buttons(run_id: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup {
+        inline_keyboard: vec![vec![
+            InlineKeyboardButton {
+                text: "💰 Extend".to_string(),
+                callback_data: format!("extend:{run_id}"),
+            },
+            InlineKeyboardButton {
+                text: "🛑 Cancel".to_string(),
+                callback_data: format!("cancel:{run_id}"),
+            },
+        ]],
+    }
+}
 
 /// The event consumer. Polls for kernel events and sends notifications.
 pub struct EventConsumer {
@@ -226,7 +250,7 @@ impl EventConsumer {
                         "💰 Budget alert for run {run_id}\n\n\
                          Token budget exceeded."
                     ),
-                    buttons: None,
+                    buttons: Some(budget_action_buttons(run_id)),
                 })
             }
             "phase.changed" | "phase_changed" => {
@@ -281,8 +305,13 @@ mod tests {
         assert!(notif.text.contains("gate-review"));
         assert!(notif.buttons.is_some());
         let buttons = notif.buttons.unwrap();
-        assert_eq!(buttons.inline_keyboard[0].len(), 1);
+        // Row 1: Approve + Reject
+        assert_eq!(buttons.inline_keyboard[0].len(), 2);
         assert_eq!(buttons.inline_keyboard[0][0].callback_data, "approve:gate-review");
+        assert_eq!(buttons.inline_keyboard[0][1].callback_data, "reject:gate-review");
+        // Row 2: Defer
+        assert_eq!(buttons.inline_keyboard[1].len(), 1);
+        assert_eq!(buttons.inline_keyboard[1][0].callback_data, "defer:gate-review");
     }
 
     #[test]
@@ -319,7 +348,11 @@ mod tests {
             .format_notification(&test_event("budget.exceeded"))
             .unwrap();
         assert!(notif.text.contains("Budget alert"));
-        assert!(notif.buttons.is_none());
+        assert!(notif.buttons.is_some());
+        let buttons = notif.buttons.unwrap();
+        assert_eq!(buttons.inline_keyboard[0].len(), 2);
+        assert_eq!(buttons.inline_keyboard[0][0].callback_data, "extend:abc123");
+        assert_eq!(buttons.inline_keyboard[0][1].callback_data, "cancel:abc123");
     }
 
     #[test]
@@ -359,9 +392,23 @@ mod tests {
     #[test]
     fn gate_buttons_have_correct_callback_data() {
         let buttons = gate_approval_buttons("gate-review");
-        assert_eq!(buttons.inline_keyboard.len(), 1);
-        assert_eq!(buttons.inline_keyboard[0].len(), 1);
+        assert_eq!(buttons.inline_keyboard.len(), 2);
+        // Row 1: Approve + Reject
+        assert_eq!(buttons.inline_keyboard[0].len(), 2);
         assert_eq!(buttons.inline_keyboard[0][0].callback_data, "approve:gate-review");
+        assert_eq!(buttons.inline_keyboard[0][1].callback_data, "reject:gate-review");
+        // Row 2: Defer
+        assert_eq!(buttons.inline_keyboard[1].len(), 1);
+        assert_eq!(buttons.inline_keyboard[1][0].callback_data, "defer:gate-review");
+    }
+
+    #[test]
+    fn budget_buttons_have_correct_callback_data() {
+        let buttons = budget_action_buttons("run-abc");
+        assert_eq!(buttons.inline_keyboard.len(), 1);
+        assert_eq!(buttons.inline_keyboard[0].len(), 2);
+        assert_eq!(buttons.inline_keyboard[0][0].callback_data, "extend:run-abc");
+        assert_eq!(buttons.inline_keyboard[0][1].callback_data, "cancel:run-abc");
     }
 
     #[test]
