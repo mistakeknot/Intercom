@@ -667,7 +667,7 @@ async fn telegram_callback(
     State(state): State<AppState>,
     Json(request): Json<TelegramCallbackRequest>,
 ) -> Json<TelegramCallbackResponse> {
-    match state.telegram.handle_callback(request, &state.demarch).await {
+    match state.telegram.handle_callback(request, &state.demarch, &state.config).await {
         Ok(response) => Json(response),
         Err(err) => Json(TelegramCallbackResponse {
             ok: false,

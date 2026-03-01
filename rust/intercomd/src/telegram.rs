@@ -474,11 +474,35 @@ impl TelegramBridge {
     /// Handle a callback query from an inline keyboard button press.
     /// Parses the callback data, routes to the appropriate Demarch write operation,
     /// edits the original message with the result, and answers the callback.
+    ///
+    /// Authorization: the callback's chat must be a registered group, and
+    /// `is_main` is derived from the group's folder (not hardcoded). This
+    /// ensures non-main groups cannot execute write operations via callbacks.
     pub async fn handle_callback(
         &self,
         request: TelegramCallbackRequest,
         demarch: &intercom_core::DemarchAdapter,
+        config: &intercom_core::IntercomConfig,
     ) -> anyhow::Result<TelegramCallbackResponse> {
+        // --- Authorization: verify chat is registered and derive is_main ---
+        let conn = self.open_sqlite()?;
+        let group = load_registered_group(&conn, &request.chat_jid)?;
+        let Some(group) = group else {
+            self.answer_callback_query(
+                &request.callback_query_id,
+                Some("Unauthorized: unregistered chat"),
+            )
+            .await?;
+            return Ok(TelegramCallbackResponse {
+                ok: false,
+                action: request.data.clone(),
+                target_id: String::new(),
+                result: None,
+                error: Some("Callback from unregistered chat".to_string()),
+            });
+        };
+        let is_main = group.folder == config.orchestrator.main_group_folder;
+
         let parts: Vec<&str> = request.data.splitn(2, ':').collect();
         if parts.len() != 2 {
             self.answer_callback_query(&request.callback_query_id, Some("Invalid action"))
@@ -503,7 +527,7 @@ impl TelegramBridge {
                         gate_id: Some(target_id.clone()),
                         reason: Some(format!("Approved by {sender} via Telegram")),
                     },
-                    true,
+                    is_main,
                 );
                 let ok = resp.status == intercom_core::DemarchStatus::Ok;
                 let status = if ok {
