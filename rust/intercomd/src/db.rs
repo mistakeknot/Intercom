@@ -10,10 +10,13 @@ use axum::response::IntoResponse;
 use axum::Json;
 use intercom_core::persistence::{
     ChatInfo, NewMessage, RegisteredGroup, ScheduledTask, TaskRunLog, TaskUpdate,
+    validate_group_folder,
 };
 use intercom_core::PgPool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+use crate::scheduler::calculate_next_run;
 
 /// Wrapper for error responses from the DB endpoints.
 #[derive(Serialize)]
@@ -225,6 +228,13 @@ pub async fn create_task(
         Ok(p) => p,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = validate_group_folder(&task.group_folder) {
+        return (StatusCode::BAD_REQUEST, Json(DbError { error: e.to_string() })).into_response();
+    }
+    // Validate schedule: cron/interval must produce a valid next_run
+    if let Err(e) = validate_schedule(&task.schedule_type, &task.schedule_value) {
+        return (StatusCode::BAD_REQUEST, Json(DbError { error: e })).into_response();
+    }
     match pool.create_task(&task).await {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => db_error(e.to_string()).into_response(),
@@ -533,5 +543,32 @@ pub async fn get_all_registered_groups(State(pool): State<Option<PgPool>>) -> im
     match pool.get_all_registered_groups().await {
         Ok(groups) => (StatusCode::OK, Json(groups)).into_response(),
         Err(e) => db_error(e.to_string()).into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Validation helpers
+// ---------------------------------------------------------------------------
+
+/// Validate schedule_type + schedule_value before inserting a task.
+/// Returns Ok(()) if valid, Err(message) if invalid.
+fn validate_schedule(schedule_type: &str, schedule_value: &str) -> Result<(), String> {
+    match schedule_type {
+        "once" => Ok(()),
+        "cron" => {
+            // Verify the cron expression parses and produces at least one next occurrence
+            match calculate_next_run(schedule_type, schedule_value, "UTC") {
+                Some(_) => Ok(()),
+                None => Err(format!("invalid cron expression: {schedule_value}")),
+            }
+        }
+        "interval" => {
+            match schedule_value.parse::<u64>() {
+                Ok(ms) if ms > 0 => Ok(()),
+                Ok(_) => Err("interval must be > 0 ms".to_string()),
+                Err(_) => Err(format!("invalid interval value: {schedule_value}")),
+            }
+        }
+        other => Err(format!("unknown schedule_type: {other}")),
     }
 }

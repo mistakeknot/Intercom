@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use intercom_core::{ContainerInput, ContainerOutput, ContainerStatus, PgPool, RegisteredGroup};
 use tokio::sync::RwLock;
@@ -263,7 +263,7 @@ async fn run_scheduled_task(
     log_and_update(pool, &task, start, final_result.as_deref(), final_error.as_deref(), timezone).await;
 }
 
-/// Log the task run and update next_run in Postgres.
+/// Log the task run and update next_run in Postgres (single transaction).
 async fn log_and_update(
     pool: &PgPool,
     task: &DueTask,
@@ -275,7 +275,6 @@ async fn log_and_update(
     let duration_ms = start.elapsed().as_millis() as i64;
     let status = if error.is_some() { "error" } else { "success" };
 
-    // Log run
     let log = intercom_core::TaskRunLog {
         task_id: task.id.clone(),
         run_at: chrono::Utc::now().to_rfc3339(),
@@ -284,19 +283,24 @@ async fn log_and_update(
         result: result.map(|s| s.to_string()),
         error: error.map(|s| s.to_string()),
     };
-    if let Err(e) = pool.log_task_run(&log).await {
-        error!(task_id = task.id.as_str(), err = %e, "failed to log task run");
-    }
 
-    // Calculate and set next_run
     let next_run = calculate_next_run(&task.schedule_type, &task.schedule_value, timezone);
     let summary = result_summary(result, error);
 
-    if let Err(e) = pool
-        .update_task_after_run(&task.id, next_run.as_deref(), &summary)
-        .await
+    const DB_TIMEOUT: Duration = Duration::from_secs(30);
+    match tokio::time::timeout(
+        DB_TIMEOUT,
+        pool.log_and_update_task(&log, &task.id, next_run.as_deref(), &summary),
+    )
+    .await
     {
-        error!(task_id = task.id.as_str(), err = %e, "failed to update task after run");
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            error!(task_id = task.id.as_str(), err = %e, "failed to log and update task (transaction)");
+        }
+        Err(_elapsed) => {
+            error!(task_id = task.id.as_str(), timeout_secs = DB_TIMEOUT.as_secs(), "DB timeout in log_and_update_task");
+        }
     }
 
     info!(

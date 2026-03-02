@@ -157,14 +157,76 @@ impl PgPool {
     }
 
     /// Get a connected client and execute a closure against it.
+    /// On connection errors, evicts the stale client so the next call reconnects.
     async fn with_client<F, T>(&self, f: F) -> anyhow::Result<T>
     where
         F: for<'c> FnOnce(&'c Client) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<T>> + Send + 'c>>,
     {
         let guard = self.get().await?;
         let client = guard.as_ref().unwrap();
-        f(client).await
+        match f(client).await {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                if is_connection_error(&e) {
+                    drop(guard);
+                    error!("evicting stale postgres client after connection error");
+                    *self.client.write().await = None;
+                }
+                Err(e)
+            }
+        }
     }
+
+    /// Like `with_client` but provides `&mut Client` for transaction support.
+    async fn with_client_mut<F, T>(&self, f: F) -> anyhow::Result<T>
+    where
+        F: for<'c> FnOnce(&'c mut Client) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<T>> + Send + 'c>>,
+    {
+        // Ensure connected
+        {
+            let guard = self.client.read().await;
+            if guard.is_none() {
+                drop(guard);
+                self.connect().await?;
+            }
+        }
+        let mut guard = self.client.write().await;
+        let client = guard.as_mut().ok_or_else(|| anyhow!("no postgres connection"))?;
+        match f(client).await {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                if is_connection_error(&e) {
+                    error!("evicting stale postgres client after connection error");
+                    *guard = None;
+                }
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Check if an error is a connection-level failure that warrants client eviction.
+fn is_connection_error(err: &anyhow::Error) -> bool {
+    // Walk the error chain looking for io::Error or tokio_postgres closed-connection indicators
+    for cause in err.chain() {
+        if let Some(io_err) = cause.downcast_ref::<std::io::Error>() {
+            match io_err.kind() {
+                std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::UnexpectedEof => return true,
+                _ => {}
+            }
+        }
+        // tokio_postgres surfaces "connection closed" as a distinct error
+        if let Some(pg_err) = cause.downcast_ref::<tokio_postgres::Error>() {
+            if pg_err.is_closed() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 async fn connect_postgres(dsn: &str) -> anyhow::Result<Client> {
@@ -177,6 +239,22 @@ async fn connect_postgres(dsn: &str) -> anyhow::Result<Client> {
         }
     });
     Ok(client)
+}
+
+// ---------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------
+
+/// Reject group_folder values that could escape the IPC directory tree.
+pub fn validate_group_folder(folder: &str) -> anyhow::Result<()> {
+    if folder.is_empty()
+        || folder.contains("..")
+        || folder.contains('/')
+        || folder.contains('\\')
+    {
+        anyhow::bail!("invalid group_folder: {folder}");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +302,9 @@ async fn ensure_schema(client: &Client) -> anyhow::Result<()> {
             );
             CREATE INDEX IF NOT EXISTS idx_tasks_next_run ON scheduled_tasks(next_run);
             CREATE INDEX IF NOT EXISTS idx_tasks_status ON scheduled_tasks(status);
+            CREATE INDEX IF NOT EXISTS idx_tasks_status_next_run
+              ON scheduled_tasks(status, next_run)
+              WHERE status = 'active' AND next_run IS NOT NULL;
 
             CREATE TABLE IF NOT EXISTS task_run_logs (
               id SERIAL PRIMARY KEY,
@@ -557,6 +638,7 @@ impl PgPool {
     // -----------------------------------------------------------------------
 
     pub async fn create_task(&self, task: &ScheduledTask) -> anyhow::Result<()> {
+        validate_group_folder(&task.group_folder)?;
         self.with_client(|client| {
             let task = task.clone();
             Box::pin(async move {
@@ -730,6 +812,36 @@ impl PgPool {
         .await
     }
 
+    /// Atomically claim up to `limit` due tasks by setting status = 'running'.
+    /// Uses SELECT FOR UPDATE SKIP LOCKED to prevent concurrent daemons from
+    /// double-claiming the same task.
+    pub async fn claim_due_tasks(&self, limit: i64) -> anyhow::Result<Vec<ScheduledTask>> {
+        self.with_client(|client| {
+            Box::pin(async move {
+                let rows = client
+                    .query(
+                        "\
+                        UPDATE scheduled_tasks
+                        SET status = 'running'
+                        WHERE id IN (
+                            SELECT id FROM scheduled_tasks
+                            WHERE status = 'active' AND next_run IS NOT NULL AND next_run <= now()
+                            ORDER BY next_run
+                            FOR UPDATE SKIP LOCKED
+                            LIMIT $1
+                        )
+                        RETURNING *
+                        ",
+                        &[&limit],
+                    )
+                    .await
+                    .context("claim_due_tasks")?;
+                Ok(rows.iter().map(|r| row_to_task(r)).collect())
+            })
+        })
+        .await
+    }
+
     pub async fn update_task_after_run(
         &self,
         id: &str,
@@ -742,26 +854,19 @@ impl PgPool {
             let last_result = last_result.to_string();
             Box::pin(async move {
                 let now = chrono_now();
-                // If next_run is None, mark task as completed
-                let new_status = if next_run.is_none() {
-                    "completed"
-                } else {
-                    "active"
-                };
                 client
                     .execute(
                         "\
                         UPDATE scheduled_tasks
                         SET next_run = $1::text::timestamptz, last_run = $2::text::timestamptz,
                             last_result = $3,
-                            status = CASE WHEN $1 IS NULL THEN 'completed' ELSE status END
+                            status = CASE WHEN $1 IS NULL THEN 'completed' ELSE 'active' END
                         WHERE id = $4
                         ",
                         &[&next_run, &now, &last_result, &id],
                     )
                     .await
                     .context("update_task_after_run")?;
-                let _ = new_status; // used in the CASE expression via $1 IS NULL
                 Ok(())
             })
         })
@@ -789,6 +894,66 @@ impl PgPool {
                     )
                     .await
                     .context("log_task_run")?;
+                Ok(())
+            })
+        })
+        .await
+    }
+
+    /// Atomically log a task run and update the task's next_run/status in a
+    /// single transaction. Prevents partial updates on crash.
+    pub async fn log_and_update_task(
+        &self,
+        log: &TaskRunLog,
+        task_id: &str,
+        next_run: Option<&str>,
+        last_result: &str,
+    ) -> anyhow::Result<()> {
+        self.with_client_mut(|client| {
+            let log = log.clone();
+            let task_id = task_id.to_string();
+            let next_run = next_run.map(|s| s.to_string());
+            let last_result = last_result.to_string();
+            Box::pin(async move {
+                let txn = client.transaction().await.context("begin transaction")?;
+
+                // 1. Insert run log
+                txn.execute(
+                    "\
+                    INSERT INTO task_run_logs (task_id, run_at, duration_ms, status, result, error)
+                    VALUES ($1, $2::text::timestamptz, $3, $4, $5, $6)
+                    ",
+                    &[
+                        &log.task_id,
+                        &log.run_at,
+                        &(log.duration_ms as i32),
+                        &log.status,
+                        &log.result,
+                        &log.error,
+                    ],
+                )
+                .await
+                .context("log_task_run in txn")?;
+
+                // 2. Update task next_run, last_run, status
+                let now = chrono_now();
+                txn.execute(
+                    "\
+                    UPDATE scheduled_tasks
+                    SET next_run = $1::text::timestamptz, last_run = $2::text::timestamptz,
+                        last_result = $3,
+                        status = CASE
+                            WHEN $1 IS NULL THEN 'completed'
+                            ELSE 'active'
+                        END
+                    WHERE id = $4
+                    ",
+                    &[&next_run, &now, &last_result, &task_id],
+                )
+                .await
+                .context("update_task_after_run in txn")?;
+
+                txn.commit().await.context("commit log_and_update")?;
                 Ok(())
             })
         })
@@ -1162,5 +1327,22 @@ mod tests {
     fn pg_pool_new() {
         let pool = PgPool::new("postgres://localhost/test".to_string());
         assert_eq!(pool.dsn, "postgres://localhost/test");
+    }
+
+    #[test]
+    fn validate_group_folder_rejects_traversal() {
+        assert!(validate_group_folder("").is_err());
+        assert!(validate_group_folder("..").is_err());
+        assert!(validate_group_folder("../etc").is_err());
+        assert!(validate_group_folder("foo/bar").is_err());
+        assert!(validate_group_folder("foo\\bar").is_err());
+        assert!(validate_group_folder("a/..").is_err());
+    }
+
+    #[test]
+    fn validate_group_folder_accepts_valid() {
+        assert!(validate_group_folder("my-group").is_ok());
+        assert!(validate_group_folder("group_123").is_ok());
+        assert!(validate_group_folder("test.folder").is_ok());
     }
 }

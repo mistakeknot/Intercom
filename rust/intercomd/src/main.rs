@@ -397,6 +397,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
                 ),
                 timezone: state.config.scheduler.timezone.clone(),
                 enabled: state.config.scheduler.enabled,
+                batch_size: 10,
             };
             let task_callback = scheduler_wiring::build_task_callback(
                 pool.clone(),

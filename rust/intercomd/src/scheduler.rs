@@ -26,6 +26,8 @@ pub struct SchedulerConfig {
     pub timezone: String,
     /// Whether the scheduler is enabled.
     pub enabled: bool,
+    /// Max tasks to claim per poll cycle.
+    pub batch_size: i64,
 }
 
 impl Default for SchedulerConfig {
@@ -34,6 +36,7 @@ impl Default for SchedulerConfig {
             poll_interval: Duration::from_secs(10),
             timezone: "UTC".to_string(),
             enabled: false,
+            batch_size: 10,
         }
     }
 }
@@ -145,40 +148,26 @@ pub async fn run_scheduler_loop(
             }
         }
 
-        match pool.get_due_tasks().await {
+        match pool.claim_due_tasks(config.batch_size).await {
             Ok(tasks) => {
                 if !tasks.is_empty() {
-                    info!(count = tasks.len(), "found due tasks");
+                    info!(count = tasks.len(), "claimed due tasks");
                 }
                 for task in tasks {
-                    // Re-verify status in case it changed between query and processing
-                    match pool.get_task_by_id(&task.id).await {
-                        Ok(Some(current)) if current.status == "active" => {
-                            debug!(task_id = %current.id, group = %current.group_folder, "dispatching task");
-                            on_task(DueTask {
-                                id: current.id,
-                                group_folder: current.group_folder,
-                                chat_jid: current.chat_jid,
-                                prompt: current.prompt,
-                                schedule_type: current.schedule_type,
-                                schedule_value: current.schedule_value,
-                                context_mode: current.context_mode,
-                            });
-                        }
-                        Ok(Some(_)) => {
-                            debug!(task_id = %task.id, "task no longer active, skipping");
-                        }
-                        Ok(None) => {
-                            debug!(task_id = %task.id, "task deleted, skipping");
-                        }
-                        Err(e) => {
-                            error!(task_id = %task.id, err = %e, "failed to re-check task");
-                        }
-                    }
+                    debug!(task_id = %task.id, group = %task.group_folder, "dispatching claimed task");
+                    on_task(DueTask {
+                        id: task.id,
+                        group_folder: task.group_folder,
+                        chat_jid: task.chat_jid,
+                        prompt: task.prompt,
+                        schedule_type: task.schedule_type,
+                        schedule_value: task.schedule_value,
+                        context_mode: task.context_mode,
+                    });
                 }
             }
             Err(e) => {
-                error!(err = %e, "failed to query due tasks");
+                error!(err = %e, "failed to claim due tasks");
             }
         }
     }

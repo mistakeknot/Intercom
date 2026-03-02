@@ -14,6 +14,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
@@ -276,6 +277,10 @@ impl GroupQueue {
                 return false;
             }
             let folder = state.group_folder.as_ref().unwrap();
+            if folder.is_empty() || folder.contains("..") || folder.contains('/') || folder.contains('\\') {
+                error!(group_jid, folder = folder.as_str(), "refusing IPC message for invalid group_folder");
+                return false;
+            }
             inner.data_dir.join("ipc").join(folder).join("input")
         };
 
@@ -477,7 +482,7 @@ fn write_ipc_message(input_dir: &Path, text: &str) -> bool {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let filename = format!("{ts}-{:04x}.json", rand_u16());
+    let filename = format!("{ts}-{:08x}.json", next_ipc_counter());
     let filepath = input_dir.join(&filename);
     let temp_path = input_dir.join(format!("{filename}.tmp"));
 
@@ -498,17 +503,20 @@ fn write_ipc_message(input_dir: &Path, text: &str) -> bool {
 }
 
 fn write_close_sentinel(data_dir: &Path, group_folder: &str) {
+    if group_folder.is_empty() || group_folder.contains("..") || group_folder.contains('/') || group_folder.contains('\\') {
+        error!(group_folder, "refusing close sentinel for invalid group_folder");
+        return;
+    }
     let input_dir = data_dir.join("ipc").join(group_folder).join("input");
     let _ = std::fs::create_dir_all(&input_dir);
     let _ = std::fs::write(input_dir.join("_close"), "");
 }
 
-/// Simple pseudo-random u16 for file name uniqueness.
-fn rand_u16() -> u16 {
-    let t = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    (t.subsec_nanos() ^ (t.as_secs() as u32).wrapping_mul(2654435761)) as u16
+/// Monotonic counter for IPC filename uniqueness (process-scoped).
+static IPC_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn next_ipc_counter() -> u64 {
+    IPC_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 #[cfg(test)]
@@ -537,9 +545,10 @@ mod tests {
     }
 
     #[test]
-    fn rand_u16_produces_values() {
-        let a = rand_u16();
-        assert!(a <= u16::MAX);
+    fn counter_increments() {
+        let a = next_ipc_counter();
+        let b = next_ipc_counter();
+        assert!(b > a, "counter should be monotonically increasing");
     }
 
     #[test]
