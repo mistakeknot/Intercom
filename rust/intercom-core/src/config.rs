@@ -28,6 +28,8 @@ pub struct EventsConfig {
     pub batch_size: u32,
     /// Chat JID to send push notifications to (usually main group).
     pub notification_jid: Option<String>,
+    /// Seconds before a phase is considered stale (default: 7200 = 2h).
+    pub stale_phase_threshold_secs: u64,
 }
 
 impl Default for EventsConfig {
@@ -37,6 +39,7 @@ impl Default for EventsConfig {
             poll_interval_ms: 1000,
             batch_size: 20,
             notification_jid: None,
+            stale_phase_threshold_secs: 7200,
         }
     }
 }
@@ -210,6 +213,8 @@ impl Default for DemarchConfig {
                 "ic run phase --json".to_string(),
                 "ic run artifact list --json".to_string(),
                 "ic run artifact get --json".to_string(),
+                "ic run tokens --json".to_string(),
+                "ic dispatch list --json".to_string(),
                 "ic events tail --consumer=intercom --json".to_string(),
                 "bd list --json".to_string(),
                 "bd ready --json".to_string(),

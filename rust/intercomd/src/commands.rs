@@ -115,6 +115,33 @@ pub fn resolve_model(args: &str) -> ModelEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Intercore run info (populated by caller, not by command handlers)
+// ---------------------------------------------------------------------------
+
+/// Summary of an active Intercore run, fetched by the HTTP handler
+/// and passed into the command handler for /status enrichment.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunInfo {
+    pub run_id: String,
+    pub goal: String,
+    pub phase: String,
+    pub phase_index: usize,
+    pub phase_count: usize,
+    pub token_budget: u64,
+    pub tokens_spent: u64,
+    pub active_dispatches: usize,
+}
+
+impl RunInfo {
+    pub fn budget_pct(&self) -> u64 {
+        if self.token_budget == 0 {
+            return 0;
+        }
+        (self.tokens_spent * 100) / self.token_budget
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Command result
 // ---------------------------------------------------------------------------
 
@@ -162,6 +189,7 @@ pub fn handle_command(
     session_id: Option<&str>,
     container_active: bool,
     ctx: &CommandContext,
+    run_info: Option<&RunInfo>,
 ) -> CommandResult {
     match command {
         "help" => handle_help(&ctx.assistant_name),
@@ -172,6 +200,7 @@ pub fn handle_command(
             session_id,
             container_active,
             ctx,
+            run_info,
         ),
         "model" => handle_model(args, current_model, group_name),
         "reset" | "new" => handle_reset(group_name, container_active),
@@ -210,6 +239,7 @@ fn handle_status(
     session_id: Option<&str>,
     container_active: bool,
     ctx: &CommandContext,
+    run_info: Option<&RunInfo>,
 ) -> CommandResult {
     let name = group_name.unwrap_or("Unknown");
     if group_folder.is_none() {
@@ -243,6 +273,31 @@ fn handle_status(
 
     let container_status = if container_active { "active" } else { "idle" };
 
+    let run_block = match run_info {
+        Some(info) => {
+            let budget_display = format_token_count(info.tokens_spent);
+            let budget_total = format_token_count(info.token_budget);
+            format!(
+                "\n\n\
+                 📋 *Active Run:* `{}`\n\
+                 Goal: {}\n\
+                 Phase: {} ({}/{})\n\
+                 Budget: {} / {} ({}%)\n\
+                 Dispatches: {} active",
+                info.run_id,
+                info.goal,
+                info.phase,
+                info.phase_index + 1,
+                info.phase_count,
+                budget_display,
+                budget_total,
+                info.budget_pct(),
+                info.active_dispatches,
+            )
+        }
+        None => String::new(),
+    };
+
     CommandResult {
         text: format!(
             "*Status for {name}*\n\
@@ -251,11 +306,21 @@ fn handle_status(
              Session: {session_display}\n\
              Container: {container_status}\n\
              Assistant: {}\n\
-             Uptime: {uptime}",
+             Uptime: {uptime}{run_block}",
             ctx.assistant_name
         ),
         parse_mode: Some("Markdown".into()),
         effects: vec![],
+    }
+}
+
+fn format_token_count(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{}k", tokens / 1_000)
+    } else {
+        format!("{tokens}")
     }
 }
 
@@ -399,14 +464,14 @@ mod tests {
 
     #[test]
     fn help_command() {
-        let result = handle_command("help", "", None, None, None, None, false, &test_ctx());
+        let result = handle_command("help", "", None, None, None, None, false, &test_ctx(), None);
         assert!(result.text.contains("TestBot Commands"));
         assert_eq!(result.parse_mode, Some("Markdown".into()));
     }
 
     #[test]
     fn status_unregistered() {
-        let result = handle_command("status", "", None, None, None, None, false, &test_ctx());
+        let result = handle_command("status", "", None, None, None, None, false, &test_ctx(), None);
         assert!(result.text.contains("not registered"));
     }
 
@@ -421,11 +486,38 @@ mod tests {
             Some("sess-abc123def456"),
             true,
             &test_ctx(),
+            None,
         );
         assert!(result.text.contains("Test Group"));
         assert!(result.text.contains("Claude Opus 4.6"));
         assert!(result.text.contains("active"));
         assert!(result.text.contains("sess-abc123d"));
+    }
+
+    #[test]
+    fn status_with_run_info() {
+        let info = RunInfo {
+            run_id: "abc123".into(),
+            goal: "Build authentication system".into(),
+            phase: "executing".into(),
+            phase_index: 5,
+            phase_count: 9,
+            token_budget: 250_000,
+            tokens_spent: 87_500,
+            active_dispatches: 2,
+        };
+        let result = handle_command(
+            "status", "", Some("Test"), Some("test"), Some("claude-opus-4-6"), None, true,
+            &test_ctx(), Some(&info),
+        );
+        assert!(result.text.contains("Active Run"));
+        assert!(result.text.contains("abc123"));
+        assert!(result.text.contains("Build authentication system"));
+        assert!(result.text.contains("executing"));
+        assert!(result.text.contains("6/9")); // phase_index + 1
+        assert!(result.text.contains("87k"));
+        assert!(result.text.contains("250k"));
+        assert!(result.text.contains("2 active"));
     }
 
     #[test]
@@ -439,6 +531,7 @@ mod tests {
             None,
             false,
             &test_ctx(),
+            None,
         );
         assert!(result.text.contains("Claude Opus 4.6"));
         assert!(result.text.contains("(active)"));
@@ -482,6 +575,7 @@ mod tests {
             None,
             false,
             &test_ctx(),
+            None,
         );
         assert!(result.text.contains("Already using"));
     }
@@ -497,6 +591,7 @@ mod tests {
             None,
             true,
             &test_ctx(),
+            None,
         );
         assert!(result.text.contains("Session cleared"));
         assert!(result.text.contains("container stopped"));
@@ -513,6 +608,7 @@ mod tests {
             None,
             false,
             &test_ctx(),
+            None,
         );
         assert!(result.text.contains("Session cleared"));
         assert!(!result.text.contains("container stopped"));
@@ -529,13 +625,14 @@ mod tests {
             None,
             false,
             &test_ctx(),
+            None,
         );
         assert!(result.text.contains("Session cleared"));
     }
 
     #[test]
     fn unknown_command() {
-        let result = handle_command("foo", "", None, None, None, None, false, &test_ctx());
+        let result = handle_command("foo", "", None, None, None, None, false, &test_ctx(), None);
         assert!(result.text.contains("Unknown command: /foo"));
     }
 
@@ -565,7 +662,7 @@ mod tests {
     #[test]
     fn reset_effects_with_active_container() {
         let result = handle_command(
-            "reset", "", Some("Test"), Some("test"), None, None, true, &test_ctx(),
+            "reset", "", Some("Test"), Some("test"), None, None, true, &test_ctx(), None,
         );
         assert_eq!(result.effects, vec![
             CommandEffect::KillContainer,
@@ -576,7 +673,7 @@ mod tests {
     #[test]
     fn reset_effects_without_active_container() {
         let result = handle_command(
-            "reset", "", Some("Test"), Some("test"), None, None, false, &test_ctx(),
+            "reset", "", Some("Test"), Some("test"), None, None, false, &test_ctx(), None,
         );
         assert_eq!(result.effects, vec![CommandEffect::ClearSession]);
     }
@@ -586,7 +683,7 @@ mod tests {
         let result = handle_command(
             "model", "gemini-3.1-pro",
             Some("Test"), Some("test"), Some("claude-opus-4-6"), None, false,
-            &test_ctx(),
+            &test_ctx(), None,
         );
         assert_eq!(result.effects, vec![
             CommandEffect::KillContainer,
@@ -603,14 +700,14 @@ mod tests {
         let result = handle_command(
             "model", "claude-opus-4-6",
             Some("Test"), Some("test"), Some("claude-opus-4-6"), None, false,
-            &test_ctx(),
+            &test_ctx(), None,
         );
         assert!(result.effects.is_empty());
     }
 
     #[test]
     fn help_no_effects() {
-        let result = handle_command("help", "", None, None, None, None, false, &test_ctx());
+        let result = handle_command("help", "", None, None, None, None, false, &test_ctx(), None);
         assert!(result.effects.is_empty());
     }
 
@@ -618,14 +715,14 @@ mod tests {
     fn status_no_effects() {
         let result = handle_command(
             "status", "", Some("Test"), Some("test"), Some("claude-opus-4-6"), None, true,
-            &test_ctx(),
+            &test_ctx(), None,
         );
         assert!(result.effects.is_empty());
     }
 
     #[test]
     fn unregistered_group_no_effects() {
-        let result = handle_command("reset", "", None, None, None, None, false, &test_ctx());
+        let result = handle_command("reset", "", None, None, None, None, false, &test_ctx(), None);
         assert!(result.effects.is_empty());
     }
 }

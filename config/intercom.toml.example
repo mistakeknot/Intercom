@@ -49,6 +49,8 @@ enabled = false
 poll_interval_ms = 1000
 batch_size = 20
 # notification_jid = "tg:1108701034"  # Chat JID for push notifications
+# Seconds before alerting that a phase is stale (default: 7200 = 2h)
+stale_phase_threshold_secs = 7200
 
 [orchestrator]
 # Enable the Rust orchestrator (message loop, queue, container dispatch).
@@ -80,6 +82,8 @@ read_allowlist = [
   "ic run phase --json",
   "ic run artifact list --json",
   "ic run artifact get --json",
+  "ic run tokens --json",
+  "ic dispatch list --json",
   "ic events tail --consumer=intercom --json",
   "bd list --json",
   "bd ready --json",

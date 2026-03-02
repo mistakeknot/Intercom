@@ -60,6 +60,13 @@ pub enum ReadOperation {
         limit: Option<u32>,
         since: Option<String>,
     },
+    RunTokens {
+        run_id: String,
+    },
+    DispatchList {
+        #[serde(default)]
+        active_only: bool,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -275,6 +282,34 @@ impl DemarchAdapter {
                 Some(DemarchCommandPlan {
                     bin: "ic",
                     signature: "ic events tail --consumer=intercom --json",
+                    args,
+                    stdin: None,
+                })
+            }
+            ReadOperation::RunTokens { run_id } => Some(DemarchCommandPlan {
+                bin: "ic",
+                signature: "ic run tokens --json",
+                args: vec![
+                    "run".to_string(),
+                    "tokens".to_string(),
+                    run_id.clone(),
+                    "--json".to_string(),
+                ],
+                stdin: None,
+            }),
+            ReadOperation::DispatchList { active_only } => {
+                let mut args = vec![
+                    "dispatch".to_string(),
+                    "list".to_string(),
+                    "--json".to_string(),
+                ];
+                if *active_only {
+                    args.push("--active".to_string());
+                }
+
+                Some(DemarchCommandPlan {
+                    bin: "ic",
+                    signature: "ic dispatch list --json",
                     args,
                     stdin: None,
                 })
@@ -793,5 +828,38 @@ mod tests {
         assert!(plan.args.contains(&"run-456".to_string()));
         // Only run_id and --json, no --max-dispatches flag
         assert_eq!(plan.args.len(), 4);
+    }
+
+    #[test]
+    fn run_tokens_plan_includes_run_id() {
+        let plan = DemarchAdapter::plan_read(&ReadOperation::RunTokens {
+            run_id: "run-abc".to_string(),
+        })
+        .expect("plan");
+
+        assert_eq!(plan.bin, "ic");
+        assert_eq!(plan.signature, "ic run tokens --json");
+        assert!(plan.args.contains(&"run-abc".to_string()));
+        assert!(plan.args.contains(&"--json".to_string()));
+    }
+
+    #[test]
+    fn dispatch_list_plan_active_only() {
+        let plan = DemarchAdapter::plan_read(&ReadOperation::DispatchList { active_only: true })
+            .expect("plan");
+
+        assert_eq!(plan.bin, "ic");
+        assert_eq!(plan.signature, "ic dispatch list --json");
+        assert!(plan.args.contains(&"--active".to_string()));
+    }
+
+    #[test]
+    fn dispatch_list_plan_all() {
+        let plan = DemarchAdapter::plan_read(&ReadOperation::DispatchList { active_only: false })
+            .expect("plan");
+
+        assert_eq!(plan.bin, "ic");
+        assert_eq!(plan.signature, "ic dispatch list --json");
+        assert!(!plan.args.contains(&"--active".to_string()));
     }
 }

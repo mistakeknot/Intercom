@@ -328,6 +328,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         batch_size: state.config.events.batch_size,
         notification_jid: state.config.events.notification_jid.clone(),
         enabled: state.config.events.enabled,
+        stale_phase_threshold_secs: state.config.events.stale_phase_threshold_secs,
     };
     let events_demarch = state.demarch.clone();
     let events_delegate: Arc<dyn ipc::IpcDelegate> =
@@ -679,6 +680,67 @@ async fn telegram_callback(
     }
 }
 
+/// Fetch Intercore run info for /status enrichment.
+/// Degrades gracefully: returns None on any error.
+async fn fetch_run_info(state: &AppState) -> Option<commands::RunInfo> {
+    let demarch = &state.demarch;
+
+    // 1. Get current run (lightweight: { found, id, goal, phase })
+    let current_resp = demarch.execute_read(ReadOperation::RunStatus { run_id: None });
+    if current_resp.status != intercom_core::DemarchStatus::Ok {
+        return None;
+    }
+    let current: serde_json::Value = serde_json::from_str(&current_resp.result).ok()?;
+    if !current.get("found")?.as_bool()? {
+        return None;
+    }
+    let run_id = current.get("id")?.as_str()?.to_string();
+    let goal = current.get("goal").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let phase = current.get("phase").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    // 2. Get full run details (phases array, token_budget)
+    let full_resp = demarch.execute_read(ReadOperation::RunStatus { run_id: Some(run_id.clone()) });
+    let (phase_index, phase_count, token_budget) = if full_resp.status == intercom_core::DemarchStatus::Ok {
+        let full: serde_json::Value = serde_json::from_str(&full_resp.result).unwrap_or_default();
+        let phases = full.get("phases").and_then(|v| v.as_array());
+        let pi = phases.as_ref().and_then(|ps| ps.iter().position(|p| p.as_str() == Some(&phase))).unwrap_or(0);
+        let pc = phases.map(|ps| ps.len()).unwrap_or(0);
+        let tb = full.get("token_budget").and_then(|v| v.as_u64()).unwrap_or(0);
+        (pi, pc, tb)
+    } else {
+        (0, 0, 0)
+    };
+
+    // 3. Get token spend
+    let tokens_resp = demarch.execute_read(ReadOperation::RunTokens { run_id: run_id.clone() });
+    let tokens_spent = if tokens_resp.status == intercom_core::DemarchStatus::Ok {
+        let tokens: serde_json::Value = serde_json::from_str(&tokens_resp.result).unwrap_or_default();
+        tokens.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
+    } else {
+        0
+    };
+
+    // 4. Get active dispatch count
+    let dispatch_resp = demarch.execute_read(ReadOperation::DispatchList { active_only: true });
+    let active_dispatches = if dispatch_resp.status == intercom_core::DemarchStatus::Ok {
+        let dispatches: serde_json::Value = serde_json::from_str(&dispatch_resp.result).unwrap_or_default();
+        dispatches.as_array().map(|a| a.len()).unwrap_or(0)
+    } else {
+        0
+    };
+
+    Some(commands::RunInfo {
+        run_id,
+        goal,
+        phase,
+        phase_index,
+        phase_count,
+        token_budget,
+        tokens_spent,
+        active_dispatches,
+    })
+}
+
 async fn handle_slash_command(
     State(state): State<AppState>,
     Json(request): Json<commands::CommandRequest>,
@@ -689,6 +751,13 @@ async fn handle_slash_command(
         assistant_name,
         started_at: state.started_at,
     };
+    // Fetch Intercore run info for /status enrichment
+    let run_info = if request.command == "status" {
+        fetch_run_info(&state).await
+    } else {
+        None
+    };
+
     let result = commands::handle_command(
         &request.command,
         &request.args,
@@ -698,6 +767,7 @@ async fn handle_slash_command(
         request.session_id.as_deref(),
         request.container_active,
         &ctx,
+        run_info.as_ref(),
     );
 
     // Apply side effects
