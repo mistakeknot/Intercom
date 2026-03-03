@@ -4,6 +4,7 @@ mod db;
 mod events;
 mod ipc;
 mod message_loop;
+mod outbox;
 mod process_group;
 mod queue;
 mod scheduler;
@@ -139,8 +140,13 @@ struct ReadyResponse {
     telegram_bridge_enabled: bool,
     postgres_connected: bool,
     orchestrator_enabled: bool,
+    use_outbox: bool,
     registered_groups: usize,
     active_containers: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outbox_pending: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outbox_failed: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -343,6 +349,9 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     // Orchestrator loops (message poll + scheduler) — behind feature flag
     let mut scheduler_handle: Option<tokio::task::JoinHandle<()>> = None;
     let mut message_loop_handle: Option<tokio::task::JoinHandle<()>> = None;
+    let mut outbox_drain_handle: Option<tokio::task::JoinHandle<()>> = None;
+    let mut outbox_listen_handle: Option<tokio::task::JoinHandle<()>> = None;
+    let mut outbox_cleanup_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     if state.config.orchestrator.enabled {
         if let Some(ref pool) = state.db {
@@ -372,25 +381,57 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
             );
             state.queue.set_process_messages_fn(process_fn).await;
 
-            // Message poll loop
-            let ml_config = message_loop::MessageLoopConfig {
-                poll_interval_ms: state.config.orchestrator.poll_interval_ms,
-                assistant_name: assistant_name.clone(),
-                main_group_folder: state.config.orchestrator.main_group_folder.clone(),
-            };
-            let ml_pool = pool.clone();
-            let ml_queue = state.queue.clone();
-            let ml_groups = state.groups.clone();
-            let ml_timestamps = state.agent_timestamps.clone();
-            let ml_shutdown = shutdown_rx.clone();
-            message_loop_handle = Some(tokio::spawn(async move {
-                message_loop::run_message_loop(
-                    ml_config, ml_pool, ml_queue, ml_groups, ml_timestamps, ml_shutdown,
-                )
-                .await;
-            }));
+            if state.config.orchestrator.use_outbox {
+                // Outbox mode: drain loop + LISTEN/NOTIFY
+                info!("outbox mode enabled — spawning drain + LISTEN loops");
 
-            // Scheduler loop
+                let (drain_tx, drain_rx) = tokio::sync::mpsc::channel::<()>(16);
+
+                // Outbox drain loop
+                let drain_pool = pool.clone();
+                let drain_queue = state.queue.clone();
+                let drain_shutdown = shutdown_rx.clone();
+                outbox_drain_handle = Some(tokio::spawn(async move {
+                    outbox::run_outbox_drain(drain_pool, drain_queue, drain_rx, drain_shutdown)
+                        .await;
+                }));
+
+                // LISTEN/NOTIFY loop (dedicated connection — DSN from config, not pool)
+                let listen_dsn = state.config.storage.postgres_dsn.clone().unwrap_or_default();
+                let listen_shutdown = shutdown_rx.clone();
+                outbox_listen_handle = Some(tokio::spawn(async move {
+                    outbox::run_listen_loop(listen_dsn, drain_tx, listen_shutdown).await;
+                }));
+
+                // Outbox cleanup loop
+                let cleanup_pool = pool.clone();
+                let cleanup_shutdown = shutdown_rx.clone();
+                outbox_cleanup_handle = Some(tokio::spawn(async move {
+                    outbox::run_outbox_cleanup(cleanup_pool, cleanup_shutdown).await;
+                }));
+            } else {
+                // Legacy polling mode
+                info!("legacy polling mode — spawning message_loop");
+
+                let ml_config = message_loop::MessageLoopConfig {
+                    poll_interval_ms: state.config.orchestrator.poll_interval_ms,
+                    assistant_name: assistant_name.clone(),
+                    main_group_folder: state.config.orchestrator.main_group_folder.clone(),
+                };
+                let ml_pool = pool.clone();
+                let ml_queue = state.queue.clone();
+                let ml_groups = state.groups.clone();
+                let ml_timestamps = state.agent_timestamps.clone();
+                let ml_shutdown = shutdown_rx.clone();
+                message_loop_handle = Some(tokio::spawn(async move {
+                    message_loop::run_message_loop(
+                        ml_config, ml_pool, ml_queue, ml_groups, ml_timestamps, ml_shutdown,
+                    )
+                    .await;
+                }));
+            }
+
+            // Scheduler loop (runs in both modes)
             let sched_config = scheduler::SchedulerConfig {
                 poll_interval: std::time::Duration::from_millis(
                     state.config.scheduler.poll_interval_ms,
@@ -417,7 +458,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
                 .await;
             }));
 
-            info!("orchestrator enabled: message loop + scheduler wired");
+            info!("orchestrator enabled: scheduler wired");
         } else {
             tracing::warn!("orchestrator.enabled=true but no Postgres connection — orchestrator disabled");
         }
@@ -482,6 +523,15 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let _ = registry_handle.await;
     let _ = events_handle.await;
     if let Some(h) = message_loop_handle {
+        let _ = h.await;
+    }
+    if let Some(h) = outbox_drain_handle {
+        let _ = h.await;
+    }
+    if let Some(h) = outbox_listen_handle {
+        let _ = h.await;
+    }
+    if let Some(h) = outbox_cleanup_handle {
         let _ = h.await;
     }
     if let Some(h) = scheduler_handle {
@@ -571,6 +621,18 @@ async fn healthz(State(state): State<AppState>) -> Json<HealthResponse> {
 async fn readyz(State(state): State<AppState>) -> Json<ReadyResponse> {
     let groups_count = state.groups.read().await.len();
     let active = state.queue.active_count().await;
+    let (outbox_pending, outbox_failed) = if state.config.orchestrator.use_outbox {
+        if let Some(ref pool) = state.db {
+            match pool.outbox_stats().await {
+                Ok(stats) => (Some(stats.pending), Some(stats.failed)),
+                Err(_) => (None, None),
+            }
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
     Json(ReadyResponse {
         status: "ready",
         runtime_profiles: state.config.runtimes.profiles.len(),
@@ -578,8 +640,11 @@ async fn readyz(State(state): State<AppState>) -> Json<ReadyResponse> {
         telegram_bridge_enabled: state.telegram.is_enabled(),
         postgres_connected: state.db.is_some(),
         orchestrator_enabled: state.config.orchestrator.enabled,
+        use_outbox: state.config.orchestrator.use_outbox,
         registered_groups: groups_count,
         active_containers: active,
+        outbox_pending,
+        outbox_failed,
     })
 }
 

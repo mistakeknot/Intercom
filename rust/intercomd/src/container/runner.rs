@@ -208,16 +208,17 @@ pub async fn run_container_agent(
             result = stdout_reader.read_line(&mut stdout_buf) => {
                 match result {
                     Ok(0) => break, // EOF
-                    Ok(_) => {
-                        // Accumulate for logging
+                    Ok(n) => {
+                        // Accumulate only the NEW bytes for logging (read_line appends)
                         if !stdout_truncated {
+                            let new_bytes = &stdout_buf[stdout_buf.len() - n..];
                             let remaining = MAX_OUTPUT_SIZE - stdout_total.len();
-                            if stdout_buf.len() > remaining {
-                                stdout_total.push_str(&stdout_buf[..remaining]);
+                            if new_bytes.len() > remaining {
+                                stdout_total.push_str(&new_bytes[..remaining]);
                                 stdout_truncated = true;
                                 warn!(group = %group.name, "Container stdout truncated");
                             } else {
-                                stdout_total.push_str(&stdout_buf);
+                                stdout_total.push_str(new_bytes);
                             }
                         }
 

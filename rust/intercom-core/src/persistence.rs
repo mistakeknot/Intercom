@@ -109,6 +109,24 @@ pub struct TaskUpdate {
     pub status: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutboxRow {
+    pub id: i64,
+    pub chat_jid: String,
+    pub payload_type: String,
+    pub payload: serde_json::Value,
+    pub status: String,
+    pub created_at: String,
+    pub attempts: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OutboxStats {
+    pub pending: i64,
+    pub processing: i64,
+    pub failed: i64,
+}
+
 // ---------------------------------------------------------------------------
 // Pool — reconnecting single-client wrapper
 // ---------------------------------------------------------------------------
@@ -338,6 +356,40 @@ async fn ensure_schema(client: &Client) -> anyhow::Result<()> {
               runtime TEXT,
               model TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS message_outbox (
+              id BIGSERIAL PRIMARY KEY,
+              chat_jid TEXT NOT NULL,
+              payload_type TEXT NOT NULL,
+              payload JSONB NOT NULL,
+              status TEXT NOT NULL DEFAULT 'pending',
+              created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+              delivered_at TIMESTAMPTZ,
+              attempts INTEGER NOT NULL DEFAULT 0,
+              last_error TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_outbox_pending
+              ON message_outbox(status, created_at)
+              WHERE status = 'pending';
+
+            CREATE OR REPLACE FUNCTION notify_outbox_insert() RETURNS TRIGGER AS $fn$
+            BEGIN
+              PERFORM pg_notify('intercom_outbox', NEW.id::TEXT);
+              RETURN NEW;
+            END;
+            $fn$ LANGUAGE plpgsql;
+
+            DO $do$
+            BEGIN
+              IF NOT EXISTS (
+                SELECT 1 FROM pg_trigger WHERE tgname = 'trg_outbox_notify'
+              ) THEN
+                CREATE TRIGGER trg_outbox_notify
+                  AFTER INSERT ON message_outbox
+                  FOR EACH ROW EXECUTE FUNCTION notify_outbox_insert();
+              END IF;
+            END;
+            $do$;
             ",
         )
         .await
@@ -1160,6 +1212,159 @@ impl PgPool {
         })
         .await
     }
+
+    // -----------------------------------------------------------------------
+    // Outbox operations
+    // -----------------------------------------------------------------------
+
+    /// Claim up to `limit` pending outbox rows atomically.
+    /// Uses SELECT FOR UPDATE SKIP LOCKED to prevent concurrent drains from
+    /// double-processing. Transitions status from 'pending' to 'processing'.
+    pub async fn claim_outbox_rows(&self, limit: i64) -> anyhow::Result<Vec<OutboxRow>> {
+        self.with_client(|client| {
+            Box::pin(async move {
+                let rows = client
+                    .query(
+                        "\
+                        UPDATE message_outbox
+                        SET status = 'processing', attempts = attempts + 1
+                        WHERE id IN (
+                          SELECT id FROM message_outbox
+                          WHERE status = 'pending' AND attempts < 5
+                          ORDER BY created_at
+                          FOR UPDATE SKIP LOCKED
+                          LIMIT $1
+                        )
+                        RETURNING id, chat_jid, payload_type, payload, status, created_at, attempts
+                        ",
+                        &[&limit],
+                    )
+                    .await
+                    .context("claim_outbox_rows")?;
+                Ok(rows.iter().map(row_to_outbox_row).collect())
+            })
+        })
+        .await
+    }
+
+    /// Mark an outbox row as delivered.
+    pub async fn mark_outbox_delivered(&self, id: i64) -> anyhow::Result<()> {
+        self.with_client(|client| {
+            Box::pin(async move {
+                client
+                    .execute(
+                        "UPDATE message_outbox SET status = 'delivered', delivered_at = now() WHERE id = $1",
+                        &[&id],
+                    )
+                    .await
+                    .context("mark_outbox_delivered")?;
+                Ok(())
+            })
+        })
+        .await
+    }
+
+    /// Mark an outbox row as permanently failed (deserialization error, max attempts).
+    pub async fn mark_outbox_failed(&self, id: i64, error: &str) -> anyhow::Result<()> {
+        self.with_client(|client| {
+            let error = error.to_string();
+            Box::pin(async move {
+                client
+                    .execute(
+                        "UPDATE message_outbox SET status = 'failed', last_error = $2 WHERE id = $1",
+                        &[&id, &error],
+                    )
+                    .await
+                    .context("mark_outbox_failed")?;
+                Ok(())
+            })
+        })
+        .await
+    }
+
+    /// Reset an outbox row back to 'pending' for retry (transient error).
+    pub async fn mark_outbox_retry(&self, id: i64, error: &str) -> anyhow::Result<()> {
+        self.with_client(|client| {
+            let error = error.to_string();
+            Box::pin(async move {
+                client
+                    .execute(
+                        "UPDATE message_outbox SET status = 'pending', last_error = $2 WHERE id = $1",
+                        &[&id, &error],
+                    )
+                    .await
+                    .context("mark_outbox_retry")?;
+                Ok(())
+            })
+        })
+        .await
+    }
+
+    /// Reset stale 'processing' rows back to 'pending' (crash recovery).
+    /// Only resets rows stuck for more than 5 minutes to avoid interfering
+    /// with rows actively being processed by a concurrent instance.
+    pub async fn recover_stale_outbox_rows(&self) -> anyhow::Result<i64> {
+        self.with_client(|client| {
+            Box::pin(async move {
+                let count = client
+                    .execute(
+                        "UPDATE message_outbox SET status = 'pending' \
+                         WHERE status = 'processing' \
+                         AND created_at < now() - interval '5 minutes'",
+                        &[],
+                    )
+                    .await
+                    .context("recover_stale_outbox_rows")?;
+                Ok(count as i64)
+            })
+        })
+        .await
+    }
+
+    /// Delete old delivered rows (cleanup).
+    pub async fn cleanup_outbox(&self, older_than_days: i64) -> anyhow::Result<i64> {
+        self.with_client(|client| {
+            Box::pin(async move {
+                let count = client
+                    .execute(
+                        "DELETE FROM message_outbox WHERE status = 'delivered' AND delivered_at < now() - make_interval(days => $1::int)",
+                        &[&(older_than_days as i32)],
+                    )
+                    .await
+                    .context("cleanup_outbox")?;
+                Ok(count as i64)
+            })
+        })
+        .await
+    }
+
+    /// Get outbox stats for readyz endpoint.
+    pub async fn outbox_stats(&self) -> anyhow::Result<OutboxStats> {
+        self.with_client(|client| {
+            Box::pin(async move {
+                let row = client
+                    .query_one(
+                        "\
+                        SELECT
+                          COUNT(*) FILTER (WHERE status = 'pending') AS pending,
+                          COUNT(*) FILTER (WHERE status = 'processing') AS processing,
+                          COUNT(*) FILTER (WHERE status = 'failed') AS failed
+                        FROM message_outbox
+                        ",
+                        &[],
+                    )
+                    .await
+                    .context("outbox_stats")?;
+                Ok(OutboxStats {
+                    pending: row.get::<_, i64>("pending"),
+                    processing: row.get::<_, i64>("processing"),
+                    failed: row.get::<_, i64>("failed"),
+                })
+            })
+        })
+        .await
+    }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -1239,6 +1444,18 @@ fn row_to_task(r: &tokio_postgres::Row) -> ScheduledTask {
             .get::<_, Option<String>>("status")
             .unwrap_or_else(|| "active".to_string()),
         created_at: format_ts(r.get("created_at")),
+    }
+}
+
+fn row_to_outbox_row(r: &tokio_postgres::Row) -> OutboxRow {
+    OutboxRow {
+        id: r.get("id"),
+        chat_jid: r.get("chat_jid"),
+        payload_type: r.get("payload_type"),
+        payload: r.get("payload"),
+        status: r.get("status"),
+        created_at: format_ts(r.get("created_at")),
+        attempts: r.get("attempts"),
     }
 }
 

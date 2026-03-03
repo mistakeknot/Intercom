@@ -236,6 +236,14 @@ async fn process_group_messages(
             let output_sent = output_sent_cb.clone();
 
             Box::pin(async move {
+                debug!(
+                    status = ?output.status,
+                    has_result = output.result.is_some(),
+                    has_session = output.new_session_id.is_some(),
+                    has_event = output.event.is_some(),
+                    "on_output callback fired"
+                );
+
                 // Track session ID from container
                 if let Some(ref sid) = output.new_session_id {
                     let mut s = sessions.write().await;

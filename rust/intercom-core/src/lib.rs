@@ -19,7 +19,7 @@ pub use demarch::{
 };
 pub use ipc::{IpcGroupContext, IpcMessage, IpcQuery, IpcQueryResponse, IpcTask};
 pub use persistence::{
-    ChatInfo, ConversationMessage, NewMessage, PgPool, RegisteredGroup, ScheduledTask, TaskRunLog,
-    TaskUpdate, validate_group_folder,
+    ChatInfo, ConversationMessage, NewMessage, OutboxRow, OutboxStats, PgPool, RegisteredGroup,
+    ScheduledTask, TaskRunLog, TaskUpdate, validate_group_folder,
 };
 pub use runtime::RuntimeKind;

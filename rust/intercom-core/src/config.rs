@@ -150,6 +150,10 @@ pub struct OrchestratorConfig {
     /// Enable the Rust orchestrator (message loop, queue, container dispatch).
     /// When false, intercomd runs as a sidecar only — Node remains the orchestrator.
     pub enabled: bool,
+    /// Use outbox-based message delivery instead of legacy polling.
+    /// When true, Node writes to message_outbox and Rust drains it.
+    /// When false, Rust polls the messages table directly (legacy).
+    pub use_outbox: bool,
     /// Maximum concurrent containers across all groups.
     pub max_concurrent_containers: usize,
     /// Poll interval for the message loop (milliseconds).
@@ -164,6 +168,7 @@ impl Default for OrchestratorConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            use_outbox: false,
             max_concurrent_containers: 3,
             poll_interval_ms: 1000,
             idle_timeout_ms: 300_000,

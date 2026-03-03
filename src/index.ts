@@ -37,6 +37,7 @@ import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startHostCallbackServer } from './host-callback.js';
 import { processTaskIpc, startIpcWatcher } from './ipc.js';
+import { initPgWriter } from './pg-writer.js';
 import { findChannel, formatOutbound } from './router.js';
 import {
   Channel,
@@ -319,6 +320,17 @@ async function main(): Promise<void> {
   ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');
+
+  // Initialize Postgres outbox writer for durable message delivery
+  const pgDsn = process.env.INTERCOM_POSTGRES_DSN;
+  if (pgDsn) {
+    await initPgWriter(pgDsn);
+  } else {
+    logger.info(
+      'INTERCOM_POSTGRES_DSN not set — outbox writer disabled, using HTTP dual-write',
+    );
+  }
+
   loadState();
 
   // Graceful shutdown handlers

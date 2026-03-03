@@ -2,10 +2,37 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 
-import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
+import {
+  ASSISTANT_NAME,
+  DATA_DIR,
+  INTERCOMD_URL,
+  STORE_DIR,
+} from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
-import { NewMessage, RegisteredGroup, ScheduledTask, TaskRunLog } from './types.js';
+import { writeToOutbox } from './pg-writer.js';
+import {
+  NewMessage,
+  RegisteredGroup,
+  ScheduledTask,
+  TaskRunLog,
+} from './types.js';
+
+// Fire-and-forget POST to intercomd for Postgres dual-write.
+// Failures are logged but never block the SQLite write path.
+function dualWriteToPostgres(endpoint: string, payload: unknown): void {
+  fetch(`${INTERCOMD_URL}/v1/db${endpoint}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(3000),
+  }).catch((err) => {
+    logger.debug(
+      { endpoint, err: err?.message },
+      'Postgres dual-write failed (non-fatal)',
+    );
+  });
+}
 
 let db: Database.Database;
 
@@ -94,44 +121,44 @@ function createSchema(database: Database.Database): void {
       `ALTER TABLE messages ADD COLUMN is_bot_message INTEGER DEFAULT 0`,
     );
     // Backfill: mark existing bot messages that used the content prefix pattern
-    database.prepare(
-      `UPDATE messages SET is_bot_message = 1 WHERE content LIKE ?`,
-    ).run(`${ASSISTANT_NAME}:%`);
+    database
+      .prepare(`UPDATE messages SET is_bot_message = 1 WHERE content LIKE ?`)
+      .run(`${ASSISTANT_NAME}:%`);
   } catch {
     /* column already exists */
   }
 
   // Add runtime column to registered_groups if it doesn't exist (migration for existing DBs)
   try {
-    database.exec(
-      `ALTER TABLE registered_groups ADD COLUMN runtime TEXT`,
-    );
+    database.exec(`ALTER TABLE registered_groups ADD COLUMN runtime TEXT`);
   } catch {
     /* column already exists */
   }
 
   // Add model column to registered_groups if it doesn't exist (migration for existing DBs)
   try {
-    database.exec(
-      `ALTER TABLE registered_groups ADD COLUMN model TEXT`,
-    );
+    database.exec(`ALTER TABLE registered_groups ADD COLUMN model TEXT`);
   } catch {
     /* column already exists */
   }
 
   // Add channel and is_group columns if they don't exist (migration for existing DBs)
   try {
-    database.exec(
-      `ALTER TABLE chats ADD COLUMN channel TEXT`,
-    );
-    database.exec(
-      `ALTER TABLE chats ADD COLUMN is_group INTEGER DEFAULT 0`,
-    );
+    database.exec(`ALTER TABLE chats ADD COLUMN channel TEXT`);
+    database.exec(`ALTER TABLE chats ADD COLUMN is_group INTEGER DEFAULT 0`);
     // Backfill from JID patterns
-    database.exec(`UPDATE chats SET channel = 'whatsapp', is_group = 1 WHERE jid LIKE '%@g.us'`);
-    database.exec(`UPDATE chats SET channel = 'whatsapp', is_group = 0 WHERE jid LIKE '%@s.whatsapp.net'`);
-    database.exec(`UPDATE chats SET channel = 'discord', is_group = 1 WHERE jid LIKE 'dc:%'`);
-    database.exec(`UPDATE chats SET channel = 'telegram', is_group = 1 WHERE jid LIKE 'tg:%'`);
+    database.exec(
+      `UPDATE chats SET channel = 'whatsapp', is_group = 1 WHERE jid LIKE '%@g.us'`,
+    );
+    database.exec(
+      `UPDATE chats SET channel = 'whatsapp', is_group = 0 WHERE jid LIKE '%@s.whatsapp.net'`,
+    );
+    database.exec(
+      `UPDATE chats SET channel = 'discord', is_group = 1 WHERE jid LIKE 'dc:%'`,
+    );
+    database.exec(
+      `UPDATE chats SET channel = 'telegram', is_group = 1 WHERE jid LIKE 'tg:%'`,
+    );
   } catch {
     /* columns already exist */
   }
@@ -192,6 +219,22 @@ export function storeChatMetadata(
     `,
     ).run(chatJid, chatJid, timestamp, ch, group);
   }
+  const chatPayload = {
+    jid: chatJid,
+    timestamp,
+    name: name ?? undefined,
+    channel: channel ?? undefined,
+    is_group: isGroup ?? undefined,
+  };
+  writeToOutbox(chatJid, 'chat_metadata', chatPayload).then((wrote) => {
+    if (!wrote) {
+      logger.warn(
+        { chat_jid: chatJid },
+        'outbox chat_metadata write failed, falling back to HTTP',
+      );
+      dualWriteToPostgres('/chats', chatPayload);
+    }
+  });
 }
 
 /**
@@ -269,6 +312,25 @@ export function storeMessage(msg: NewMessage): void {
     msg.is_from_me ? 1 : 0,
     msg.is_bot_message ? 1 : 0,
   );
+  const payload = {
+    id: msg.id,
+    chat_jid: msg.chat_jid,
+    sender: msg.sender,
+    sender_name: msg.sender_name,
+    content: msg.content,
+    timestamp: msg.timestamp,
+    is_from_me: !!msg.is_from_me,
+    is_bot_message: !!msg.is_bot_message,
+  };
+  writeToOutbox(msg.chat_jid, 'message', payload).then((wrote) => {
+    if (!wrote) {
+      logger.warn(
+        { chat_jid: msg.chat_jid },
+        'outbox write failed, falling back to HTTP',
+      );
+      dualWriteToPostgres('/messages', payload);
+    }
+  });
 }
 
 /**
@@ -296,6 +358,25 @@ export function storeMessageDirect(msg: {
     msg.is_from_me ? 1 : 0,
     msg.is_bot_message ? 1 : 0,
   );
+  const payload = {
+    id: msg.id,
+    chat_jid: msg.chat_jid,
+    sender: msg.sender,
+    sender_name: msg.sender_name,
+    content: msg.content,
+    timestamp: msg.timestamp,
+    is_from_me: !!msg.is_from_me,
+    is_bot_message: !!msg.is_bot_message,
+  };
+  writeToOutbox(msg.chat_jid, 'message', payload).then((wrote) => {
+    if (!wrote) {
+      logger.warn(
+        { chat_jid: msg.chat_jid },
+        'outbox write failed, falling back to HTTP',
+      );
+      dualWriteToPostgres('/messages', payload);
+    }
+  });
 }
 
 /**
@@ -305,14 +386,28 @@ export function storeMessageDirect(msg: {
 export function getRecentConversation(
   chatJid: string,
   limit: number,
-): { sender_name: string; content: string; timestamp: string; is_bot_message: boolean }[] {
-  const rows = db.prepare(`
+): {
+  sender_name: string;
+  content: string;
+  timestamp: string;
+  is_bot_message: boolean;
+}[] {
+  const rows = db
+    .prepare(
+      `
     SELECT sender_name, content, timestamp, is_bot_message
     FROM messages
     WHERE chat_jid = ? AND content != '' AND content IS NOT NULL
     ORDER BY timestamp DESC
     LIMIT ?
-  `).all(chatJid, limit) as { sender_name: string; content: string; timestamp: string; is_bot_message: number }[];
+  `,
+    )
+    .all(chatJid, limit) as {
+    sender_name: string;
+    content: string;
+    timestamp: string;
+    is_bot_message: number;
+  }[];
   return rows.reverse().map((r) => ({
     sender_name: r.sender_name,
     content: r.content,
@@ -587,16 +682,14 @@ export function getRegisteredGroup(
     containerConfig: row.container_config
       ? JSON.parse(row.container_config)
       : undefined,
-    requiresTrigger: row.requires_trigger === null ? undefined : row.requires_trigger === 1,
+    requiresTrigger:
+      row.requires_trigger === null ? undefined : row.requires_trigger === 1,
     runtime: (row.runtime as RegisteredGroup['runtime']) || undefined,
     model: row.model || undefined,
   };
 }
 
-export function setRegisteredGroup(
-  jid: string,
-  group: RegisteredGroup,
-): void {
+export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   if (!isValidGroupFolder(group.folder)) {
     throw new Error(`Invalid group folder "${group.folder}" for JID ${jid}`);
   }
@@ -617,9 +710,7 @@ export function setRegisteredGroup(
 }
 
 export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
-  const rows = db
-    .prepare('SELECT * FROM registered_groups')
-    .all() as Array<{
+  const rows = db.prepare('SELECT * FROM registered_groups').all() as Array<{
     jid: string;
     name: string;
     folder: string;
@@ -647,7 +738,8 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
       containerConfig: row.container_config
         ? JSON.parse(row.container_config)
         : undefined,
-      requiresTrigger: row.requires_trigger === null ? undefined : row.requires_trigger === 1,
+      requiresTrigger:
+        row.requires_trigger === null ? undefined : row.requires_trigger === 1,
       runtime: (row.runtime as RegisteredGroup['runtime']) || undefined,
       model: row.model || undefined,
     };
