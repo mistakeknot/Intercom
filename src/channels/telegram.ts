@@ -1,6 +1,10 @@
-import { Bot } from 'grammy';
+import fs from 'fs';
+import path from 'path';
 
-import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import { Bot, type Context } from 'grammy';
+import { type FileFlavor, hydrateFiles } from '@grammyjs/files';
+
+import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
 import {
   editTelegramViaIntercomd,
   routeTelegramCallback,
@@ -23,10 +27,12 @@ export interface TelegramChannelOpts {
   registeredGroups: () => Record<string, RegisteredGroup>;
 }
 
+type MyContext = FileFlavor<Context>;
+
 export class TelegramChannel implements Channel {
   name = 'telegram';
 
-  private bot: Bot | null = null;
+  private bot: Bot<MyContext> | null = null;
   private opts: TelegramChannelOpts;
   private botToken: string;
 
@@ -36,7 +42,8 @@ export class TelegramChannel implements Channel {
   }
 
   async connect(): Promise<void> {
-    this.bot = new Bot(this.botToken);
+    this.bot = new Bot<MyContext>(this.botToken);
+    this.bot.api.config.use(hydrateFiles(this.botToken));
 
     // Command to get chat ID (useful for registration)
     this.bot.command('chatid', (ctx) => {
@@ -249,15 +256,45 @@ export class TelegramChannel implements Channel {
       });
     };
 
-    this.bot.on('message:photo', async (ctx) => await storeNonText(ctx, '[Photo]'));
+    // Download a file from Telegram to the group's media directory.
+    // Returns the relative path (from group dir) on success, null on failure.
+    const downloadMedia = async (
+      ctx: any,
+      groupFolder: string,
+      ext: string,
+    ): Promise<string | null> => {
+      try {
+        const mediaDir = path.join(GROUPS_DIR, groupFolder, 'media');
+        fs.mkdirSync(mediaDir, { recursive: true });
+        const filename = `${ctx.message.message_id}_${Date.now()}${ext}`;
+        const filePath = path.join(mediaDir, filename);
+        const file = await ctx.getFile();
+        await file.download(filePath);
+        return `media/${filename}`;
+      } catch (e: any) {
+        logger.warn({ err: e.message }, 'Failed to download Telegram media');
+        return null;
+      }
+    };
+
+    this.bot.on('message:photo', async (ctx) => {
+      const group = this.opts.registeredGroups()[`tg:${ctx.chat.id}`];
+      const rel = group ? await downloadMedia(ctx, group.folder, '.jpg') : null;
+      const tag = rel ? `[Image: ${rel}]` : '[Photo]';
+      await storeNonText(ctx, tag);
+    });
     this.bot.on('message:video', async (ctx) => await storeNonText(ctx, '[Video]'));
     this.bot.on('message:voice', async (ctx) =>
       await storeNonText(ctx, '[Voice message]'),
     );
     this.bot.on('message:audio', async (ctx) => await storeNonText(ctx, '[Audio]'));
     this.bot.on('message:document', async (ctx) => {
-      const name = ctx.message.document?.file_name || 'file';
-      await storeNonText(ctx, `[Document: ${name}]`);
+      const group = this.opts.registeredGroups()[`tg:${ctx.chat.id}`];
+      const origName = ctx.message.document?.file_name || 'file';
+      const ext = path.extname(origName) || '';
+      const rel = group ? await downloadMedia(ctx, group.folder, ext) : null;
+      const tag = rel ? `[Document: ${rel}]` : `[Document: ${origName}]`;
+      await storeNonText(ctx, tag);
     });
     this.bot.on('message:sticker', async (ctx) => {
       const emoji = ctx.message.sticker?.emoji || '';
