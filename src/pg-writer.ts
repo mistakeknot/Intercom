@@ -56,7 +56,7 @@ export async function initPgWriter(dsn: string): Promise<void> {
  */
 export async function writeToOutbox(
   chatJid: string,
-  payloadType: 'message' | 'chat_metadata',
+  payloadType: 'message' | 'chat_metadata' | 'group_registration' | 'task',
   payload: unknown,
 ): Promise<boolean> {
   if (!pgPool) return false;

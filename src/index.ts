@@ -8,6 +8,7 @@ import {
   DEFAULT_RUNTIME,
   findModel,
   HOST_CALLBACK_PORT,
+  INTERCOMD_URL,
   MAIN_GROUP_FOLDER,
   MODEL_CATALOG,
   Runtime,
@@ -55,6 +56,38 @@ let whatsapp: WhatsAppChannel;
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 
+/**
+ * Fire-and-forget sync of a registered group to Rust's Postgres + in-memory map.
+ * Uses the /v1/db/groups/set-sync endpoint which updates both atomically.
+ * Transforms Node's camelCase fields to Rust's snake_case.
+ */
+function syncGroupToPostgres(jid: string, group: RegisteredGroup): void {
+  const payload = {
+    jid,
+    name: group.name,
+    folder: group.folder,
+    trigger: group.trigger,
+    added_at: group.added_at,
+    container_config: group.containerConfig
+      ? group.containerConfig
+      : undefined,
+    requires_trigger: group.requiresTrigger,
+    runtime: group.runtime,
+    model: group.model,
+  };
+  fetch(`${INTERCOMD_URL}/v1/db/groups/set-sync`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(3000),
+  }).catch((err) => {
+    logger.debug(
+      { jid, err: err?.message },
+      'Group sync to Postgres failed (non-fatal)',
+    );
+  });
+}
+
 function loadState(): void {
   sessions = getAllSessions();
   registeredGroups = getAllRegisteredGroups();
@@ -78,6 +111,7 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
 
   registeredGroups[jid] = group;
   setRegisteredGroup(jid, group);
+  syncGroupToPostgres(jid, group);
 
   // Create group folder
   fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
@@ -264,6 +298,7 @@ function handleModel(chatJid: string, args: string): CommandResult {
   group.runtime = newModel.runtime;
   registeredGroups[chatJid] = group;
   setRegisteredGroup(chatJid, group);
+  syncGroupToPostgres(chatJid, group);
 
   // Clear stale reported model name — next container run will report the new one
   delete reportedModels[group.folder];
@@ -396,6 +431,10 @@ async function main(): Promise<void> {
       await channel.sendMessage(jid, text);
     },
     getRegisteredGroups: () => registeredGroups,
+    setTyping: async (jid, isTyping) => {
+      const channel = findChannel(channels, jid);
+      if (channel?.setTyping) await channel.setTyping(jid, isTyping);
+    },
     forwardTask: async (task, groupFolder, isMain) => {
       await processTaskIpc(
         task as Parameters<typeof processTaskIpc>[0],

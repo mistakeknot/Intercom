@@ -16,6 +16,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use futures::FutureExt;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
@@ -394,8 +395,22 @@ async fn run_for_group(queue: Arc<Mutex<Inner>>, group_jid: String) {
         inner.process_messages_fn.clone()
     };
 
+    // Catch panics so reset_group always runs (matches Node's try/finally).
+    // Without this, a panic leaves active=true permanently, blocking the group.
     let success = if let Some(ref f) = process_fn {
-        f(group_jid.clone()).await
+        match std::panic::AssertUnwindSafe(f(group_jid.clone()))
+            .catch_unwind()
+            .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                error!(
+                    group_jid = group_jid.as_str(),
+                    "process_messages_fn panicked"
+                );
+                false
+            }
+        }
     } else {
         warn!(
             group_jid = group_jid.as_str(),
@@ -434,10 +449,14 @@ async fn run_for_group(queue: Arc<Mutex<Inner>>, group_jid: String) {
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 let mut inner = queue_clone.lock().await;
-                if !inner.shutting_down {
-                    let state = inner.get_or_insert(&jid_clone);
-                    state.pending_messages = true;
+                if inner.shutting_down {
+                    return;
                 }
+                let state = inner.get_or_insert(&jid_clone);
+                state.pending_messages = true;
+                // Trigger drain so the flag is actually picked up.
+                // Without this, the group stays stuck until a new external message arrives.
+                drain_pending(&mut inner, queue_clone.clone());
             });
         } else {
             error!(
@@ -452,7 +471,66 @@ async fn run_for_group(queue: Arc<Mutex<Inner>>, group_jid: String) {
     }
 
     inner.reset_group(&group_jid);
-    // Drain is handled by the next poll cycle or enqueue call
+    drain_pending(&mut inner, queue.clone());
+}
+
+/// After a group finishes, check for pending work on that group and waiting groups.
+/// Tasks drain before messages (matching Node's drainGroup priority ordering).
+fn drain_pending(inner: &mut Inner, queue: Arc<Mutex<Inner>>) {
+    if inner.shutting_down {
+        return;
+    }
+
+    let mut message_spawns: Vec<String> = Vec::new();
+    let mut task_spawns: Vec<(String, QueuedTask)> = Vec::new();
+
+    let candidates: Vec<String> = inner
+        .groups
+        .iter()
+        .filter(|(_, s)| !s.active && (s.pending_messages || !s.pending_tasks.is_empty()))
+        .map(|(jid, _)| jid.clone())
+        .collect();
+
+    for jid in candidates {
+        if inner.active_count >= inner.max_concurrent {
+            break;
+        }
+        let state = inner.get_or_insert(&jid);
+        if state.active {
+            continue;
+        }
+
+        // Tasks first (they won't be re-discovered from the database like messages)
+        if let Some(task) = state.pending_tasks.pop_front() {
+            state.active = true;
+            state.idle_waiting = false;
+            state.is_task_container = true;
+            inner.active_count += 1;
+            inner.waiting_groups.retain(|w| w != &jid);
+            task_spawns.push((jid, task));
+        } else if state.pending_messages {
+            state.active = true;
+            state.idle_waiting = false;
+            state.is_task_container = false;
+            state.pending_messages = false;
+            inner.active_count += 1;
+            inner.waiting_groups.retain(|w| w != &jid);
+            message_spawns.push(jid);
+        }
+    }
+
+    for jid in message_spawns {
+        let queue_clone = queue.clone();
+        tokio::spawn(async move {
+            run_for_group(queue_clone, jid).await;
+        });
+    }
+    for (jid, task) in task_spawns {
+        let queue_clone = queue.clone();
+        tokio::spawn(async move {
+            run_task(queue_clone, jid, task).await;
+        });
+    }
 }
 
 async fn run_task(queue: Arc<Mutex<Inner>>, group_jid: String, task: QueuedTask) {
@@ -462,11 +540,21 @@ async fn run_task(queue: Arc<Mutex<Inner>>, group_jid: String, task: QueuedTask)
         "running queued task"
     );
 
-    // Execute the task
-    (task.task_fn)().await;
+    // Catch panics so reset_group always runs (matches Node's try/finally)
+    if let Err(_) = std::panic::AssertUnwindSafe((task.task_fn)())
+        .catch_unwind()
+        .await
+    {
+        error!(
+            group_jid = group_jid.as_str(),
+            task_id = task.id.as_str(),
+            "task_fn panicked"
+        );
+    }
 
     let mut inner = queue.lock().await;
     inner.reset_group(&group_jid);
+    drain_pending(&mut inner, queue.clone());
 }
 
 // ---------------------------------------------------------------------------

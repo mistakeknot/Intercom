@@ -38,3 +38,4 @@ agents-sdk-docs
 
 # Clavain session artifacts
 .clavain/
+.clavain/verdicts/

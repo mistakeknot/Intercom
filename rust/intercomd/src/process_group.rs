@@ -15,11 +15,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use intercom_core::{
     ContainerInput, ContainerOutput, ContainerStatus, PgPool, RegisteredGroup, RuntimeKind,
 };
 use tokio::sync::RwLock;
+use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use crate::container::mounts::GroupInfo;
@@ -210,6 +212,26 @@ async fn process_group_messages(
         write_snapshots(&run_config.data_dir, &group.folder, is_main, &tasks_json, &groups_json).await;
     }
 
+    // 5c. Send typing indicator and start periodic refresh
+    let is_telegram = chat_jid.starts_with("tg:");
+    if is_telegram {
+        telegram.send_typing(chat_jid).await;
+    }
+    let typing_handle: Option<JoinHandle<()>> = if is_telegram {
+        let tg = telegram.clone();
+        let jid = chat_jid.to_string();
+        Some(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(4));
+            interval.tick().await; // skip immediate first tick
+            loop {
+                interval.tick().await;
+                tg.send_typing(&jid).await;
+            }
+        }))
+    } else {
+        None
+    };
+
     // 6. Run container and collect output
     let sessions_clone: Arc<RwLock<HashMap<String, String>>> = sessions.clone();
     let group_folder = group.folder.clone();
@@ -294,6 +316,22 @@ async fn process_group_messages(
         },
     )));
 
+    // Register the container process in the queue after spawn so IPC features
+    // (kill_group, send_message, notify_idle) can find it.
+    let on_spawn: Option<Arc<crate::container::runner::OnSpawnCallback>> = {
+        let q = queue.clone();
+        let jid = chat_jid.to_string();
+        let folder = group.folder.clone();
+        Some(Arc::new(Box::new(move |container_name: String| {
+            let q = q.clone();
+            let jid = jid.clone();
+            let folder = folder.clone();
+            Box::pin(async move {
+                q.register_process(&jid, &container_name, Some(folder.as_str())).await;
+            })
+        })))
+    };
+
     let result = run_container_agent(
         &group_info,
         &input,
@@ -301,8 +339,14 @@ async fn process_group_messages(
         is_main,
         run_config,
         on_output,
+        on_spawn,
     )
     .await;
+
+    // Stop typing indicator refresh
+    if let Some(handle) = typing_handle {
+        handle.abort();
+    }
 
     // 7. Handle result
     match result {

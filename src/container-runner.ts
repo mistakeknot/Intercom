@@ -289,6 +289,10 @@ function buildContainerArgs(mounts: VolumeMount[], containerName: string, runtim
     // Overlay excluded subdirectories with empty tmpfs so they're invisible to the agent
     if (mount.exclude) {
       for (const subdir of mount.exclude) {
+        if (!subdir || subdir.includes('..') || subdir.includes('/') || subdir.includes('\\') || subdir.includes(',')) {
+          logger.warn({ subdir, hostPath: mount.hostPath }, 'Skipping invalid exclude value');
+          continue;
+        }
         args.push('--mount', `type=tmpfs,destination=${mount.containerPath}/${subdir},tmpfs-size=0`);
       }
     }

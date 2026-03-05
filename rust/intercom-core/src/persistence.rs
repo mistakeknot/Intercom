@@ -372,6 +372,7 @@ async fn ensure_schema(client: &Client) -> anyhow::Result<()> {
               ON message_outbox(status, created_at)
               WHERE status = 'pending';
 
+            -- Channel name 'intercom_outbox' must match OUTBOX_CHANNEL in outbox.rs.
             CREATE OR REPLACE FUNCTION notify_outbox_insert() RETURNS TRIGGER AS $fn$
             BEGIN
               PERFORM pg_notify('intercom_outbox', NEW.id::TEXT);
@@ -1220,10 +1221,17 @@ impl PgPool {
     /// Claim up to `limit` pending outbox rows atomically.
     /// Uses SELECT FOR UPDATE SKIP LOCKED to prevent concurrent drains from
     /// double-processing. Transitions status from 'pending' to 'processing'.
+    ///
+    /// **Concurrency note**: This method is designed for a single drain loop.
+    /// If multiple concurrent drains are introduced, SKIP LOCKED prevents
+    /// double-claims, but the shared `with_client_mut` write lock could
+    /// serialize all outbox I/O during reconnects. Add per-drain connections
+    /// or a connection pool before scaling beyond a single drain.
     pub async fn claim_outbox_rows(&self, limit: i64) -> anyhow::Result<Vec<OutboxRow>> {
-        self.with_client(|client| {
+        self.with_client_mut(|client| {
             Box::pin(async move {
-                let rows = client
+                let txn = client.transaction().await.context("begin claim transaction")?;
+                let rows = txn
                     .query(
                         "\
                         UPDATE message_outbox
@@ -1241,7 +1249,9 @@ impl PgPool {
                     )
                     .await
                     .context("claim_outbox_rows")?;
-                Ok(rows.iter().map(row_to_outbox_row).collect())
+                let result: Vec<OutboxRow> = rows.iter().map(row_to_outbox_row).collect();
+                txn.commit().await.context("commit claim transaction")?;
+                Ok(result)
             })
         })
         .await
@@ -1283,17 +1293,30 @@ impl PgPool {
     }
 
     /// Reset an outbox row back to 'pending' for retry (transient error).
+    /// If attempts have reached the max (5), marks as 'failed' instead to
+    /// prevent zombie rows that are pending but invisible to claim_outbox_rows.
+    /// Fires NOTIFY so the drain loop picks up the retried row immediately
+    /// instead of waiting up to 30s for the fallback poll.
     pub async fn mark_outbox_retry(&self, id: i64, error: &str) -> anyhow::Result<()> {
         self.with_client(|client| {
             let error = error.to_string();
             Box::pin(async move {
                 client
                     .execute(
-                        "UPDATE message_outbox SET status = 'pending', last_error = $2 WHERE id = $1",
+                        "\
+                        UPDATE message_outbox SET \
+                          status = CASE WHEN attempts >= 5 THEN 'failed' ELSE 'pending' END, \
+                          last_error = $2 \
+                        WHERE id = $1",
                         &[&id, &error],
                     )
                     .await
                     .context("mark_outbox_retry")?;
+                // Fire NOTIFY so the drain loop picks up retried rows immediately
+                // (the INSERT trigger fires NOTIFY, but UPDATE does not)
+                let _ = client
+                    .execute("SELECT pg_notify('intercom_outbox', '')", &[])
+                    .await;
                 Ok(())
             })
         })
@@ -1323,12 +1346,16 @@ impl PgPool {
 
     /// Delete old delivered rows (cleanup).
     pub async fn cleanup_outbox(&self, older_than_days: i64) -> anyhow::Result<i64> {
+        if older_than_days <= 0 || older_than_days > i32::MAX as i64 {
+            anyhow::bail!("cleanup_outbox: older_than_days out of range: {older_than_days}");
+        }
+        let days_i32 = older_than_days as i32;
         self.with_client(|client| {
             Box::pin(async move {
                 let count = client
                     .execute(
                         "DELETE FROM message_outbox WHERE status = 'delivered' AND delivered_at < now() - make_interval(days => $1::int)",
-                        &[&(older_than_days as i32)],
+                        &[&days_i32],
                     )
                     .await
                     .context("cleanup_outbox")?;

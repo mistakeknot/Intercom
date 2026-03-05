@@ -18,6 +18,20 @@ Your output is sent to the user or group.
 
 You also have `mcp__nanoclaw__send_message` which sends a message immediately while you're still working. This is useful when you want to acknowledge a request before starting longer work.
 
+### Avoiding duplicate messages
+
+There are two separate message paths: `send_message` (delivered immediately during execution) and your final output (delivered when you finish). There is NO deduplication between them.
+
+**Rule**: After using `send_message`, always wrap your final output in `<internal>` tags to prevent the user seeing the same content twice.
+
+```
+<send_message: "Here's what I found...">
+
+<internal>Already sent the findings via send_message. No need to repeat.</internal>
+```
+
+If your final output contains a mix of new content and repeated content, only wrap the repeated parts in `<internal>`.
+
 ### Internal thoughts
 
 If part of your output is internal reasoning rather than something for the user, wrap it in `<internal>` tags:
@@ -61,12 +75,13 @@ This is the **main channel**, which has elevated privileges.
 
 ## Container Mounts
 
-Main has read-only access to the project and read-write access to its group folder:
-
 | Container Path | Host Path | Access |
 |----------------|-----------|--------|
-| `/workspace/project` | Project root | read-only |
+| `/workspace/project` | Intercom project root (`~/projects/Demarch/apps/intercom`) | read-only |
 | `/workspace/group` | `groups/main/` | read-write |
+| `/workspace/extra/projects` | `~/projects` (all development projects) | read-write |
+
+**Intercom's own source code** is at `/workspace/extra/projects/Demarch/apps/intercom/` (read-write). The `/workspace/project` mount is the same directory but read-only. Use the `/workspace/extra/projects/` path when you need to edit intercom or any other project.
 
 Key paths inside the container:
 - `/workspace/project/store/messages.db` - SQLite database

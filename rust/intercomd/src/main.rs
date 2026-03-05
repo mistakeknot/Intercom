@@ -18,6 +18,8 @@ use std::time::Instant;
 
 use anyhow::{Context, anyhow};
 use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::{Parser, Subcommand};
@@ -305,7 +307,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     };
     let delegate: Arc<dyn ipc::IpcDelegate> =
         Arc::new(ipc::HttpDelegate::new(&host_callback_url));
-    let registry = ipc::GroupRegistry::new();
+    let registry = ipc::GroupRegistry::with_fallback(state.groups.clone());
     info!(
         host_callback_url = %host_callback_url,
         "IPC delegate: forwarding messages/tasks to Node host"
@@ -361,7 +363,9 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
                 data_dir: project_root.join("data"),
                 timezone: state.config.scheduler.timezone.clone(),
                 idle_timeout_ms: state.config.orchestrator.idle_timeout_ms,
-                allowlist: None,
+                allowlist: container::security::load_allowlist(
+                    &container::security::default_allowlist_path(),
+                ),
             };
 
             let assistant_name = std::env::var("ASSISTANT_NAME")
@@ -390,9 +394,10 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
                 // Outbox drain loop
                 let drain_pool = pool.clone();
                 let drain_queue = state.queue.clone();
+                let drain_groups = state.groups.clone();
                 let drain_shutdown = shutdown_rx.clone();
                 outbox_drain_handle = Some(tokio::spawn(async move {
-                    outbox::run_outbox_drain(drain_pool, drain_queue, drain_rx, drain_shutdown)
+                    outbox::run_outbox_drain(drain_pool, drain_queue, drain_groups, drain_rx, drain_shutdown)
                         .await;
                 }));
 
@@ -505,6 +510,8 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         .route("/v1/telegram/edit", post(telegram_edit))
         .route("/v1/telegram/callback", post(telegram_callback))
         .route("/v1/commands", post(handle_slash_command))
+        // groups/set on the main router so it can update the in-memory map
+        .route("/v1/db/groups/set-sync", post(set_registered_group_sync))
         .nest("/v1/db", db_routes)
         .with_state(state);
 
@@ -805,6 +812,38 @@ async fn fetch_run_info(state: &AppState) -> Option<commands::RunInfo> {
         tokens_spent,
         active_dispatches,
     })
+}
+
+/// Write a group to Postgres AND update the in-memory groups map.
+/// Use this instead of /v1/db/groups/set when the caller needs the Rust
+/// orchestrator to immediately see the change.
+async fn set_registered_group_sync(
+    State(state): State<AppState>,
+    Json(group): Json<RegisteredGroup>,
+) -> impl IntoResponse {
+    let pool = match &state.db {
+        Some(p) => p,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "postgres not available"})),
+            )
+                .into_response()
+        }
+    };
+    if let Err(e) = pool.set_registered_group(&group).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response();
+    }
+    // Update in-memory map so the orchestrator sees the group immediately
+    {
+        let mut groups = state.groups.write().await;
+        groups.insert(group.jid.clone(), group);
+    }
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
 
 async fn handle_slash_command(

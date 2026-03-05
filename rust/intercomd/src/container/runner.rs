@@ -35,6 +35,9 @@ const DEFAULT_TIMEOUT_MS: u64 = 300_000;
 /// Default idle timeout (30 minutes).
 const DEFAULT_IDLE_TIMEOUT_MS: u64 = 1_800_000;
 
+/// Startup timeout — container must produce first output within this window.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Configuration for running a container agent.
 #[derive(Clone)]
 pub struct RunConfig {
@@ -70,6 +73,10 @@ pub struct RunResult {
 pub type OutputCallback =
     Box<dyn Fn(ContainerOutput) -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
 
+/// Callback invoked after the container process is spawned, with the container name.
+pub type OnSpawnCallback =
+    Box<dyn Fn(String) -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
+
 /// Run a container agent: spawn, write input, stream output, manage lifecycle.
 ///
 /// This is the Rust equivalent of `runContainerAgent()` from container-runner.ts.
@@ -80,6 +87,7 @@ pub async fn run_container_agent(
     is_main: bool,
     config: &RunConfig,
     on_output: Option<Arc<OutputCallback>>,
+    on_spawn: Option<Arc<OnSpawnCallback>>,
 ) -> anyhow::Result<RunResult> {
     let start = Instant::now();
 
@@ -122,6 +130,11 @@ pub async fn run_container_agent(
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to spawn container: {}", e))?;
 
+    // Notify caller of container name so they can register the process.
+    if let Some(ref cb) = on_spawn {
+        cb(name.clone()).await;
+    }
+
     // Write input + secrets to stdin
     let mut stdin_input = input.clone();
     stdin_input.secrets = Some(read_secrets(&config.project_root));
@@ -149,19 +162,43 @@ pub async fn run_container_agent(
     let had_streaming_output = Arc::new(Mutex::new(false));
     let new_session_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
-    // Timeout watchdog task
+    // Timeout watchdog task — two-phase:
+    //   Phase 1: startup timeout (30s) — container must produce first output
+    //   Phase 2: activity-based timeout — uses configured timeout duration
     let timeout_name = name.clone();
     let timeout_flag = timed_out.clone();
+    let spawn_time = Instant::now();
     let timeout_handle = tokio::spawn(async move {
+        let mut has_received_activity = false;
+
         loop {
             let last_activity = *activity_rx.borrow();
+            // If activity was received since spawn, we're past startup phase
+            if last_activity > spawn_time {
+                has_received_activity = true;
+            }
+
+            let effective_timeout = if has_received_activity {
+                timeout_duration
+            } else {
+                STARTUP_TIMEOUT
+            };
+
             let elapsed = last_activity.elapsed();
-            if elapsed >= timeout_duration {
+            if elapsed >= effective_timeout {
                 *timeout_flag.lock().await = true;
-                error!(
-                    container_name = %timeout_name,
-                    "Container timeout, stopping"
-                );
+                if has_received_activity {
+                    error!(
+                        container_name = %timeout_name,
+                        "Container timeout, stopping"
+                    );
+                } else {
+                    error!(
+                        container_name = %timeout_name,
+                        startup_timeout_secs = STARTUP_TIMEOUT.as_secs(),
+                        "Container startup timeout — no output received, stopping"
+                    );
+                }
                 // Graceful stop
                 let stop_result = Command::new(CONTAINER_RUNTIME_BIN)
                     .args(["stop", &timeout_name])
@@ -176,7 +213,7 @@ pub async fn run_container_agent(
                 }
                 break;
             }
-            let remaining = timeout_duration - elapsed;
+            let remaining = effective_timeout - elapsed;
             tokio::select! {
                 _ = tokio::time::sleep(remaining) => {}
                 _ = activity_rx.changed() => {}
@@ -282,7 +319,9 @@ pub async fn run_container_agent(
                         }
                         stderr_buf.clear();
                     }
-                    Err(_) => {} // stderr error, non-fatal
+                    Err(e) => {
+                        debug!(group = %group.folder, err = %e, "stderr read error (non-fatal)");
+                    }
                 }
             }
         }
@@ -368,8 +407,17 @@ pub async fn run_container_agent(
             duration_ms = duration.as_millis(),
             "Container exited with error"
         );
-        let tail = if stderr_total.len() > 200 {
-            &stderr_total[stderr_total.len() - 200..]
+        // Log full stderr for diagnostics
+        if !stderr_total.is_empty() {
+            warn!(
+                group = %group.name,
+                stderr_len = stderr_total.len(),
+                "Container stderr:\n{}",
+                stderr_total
+            );
+        }
+        let tail = if stderr_total.len() > 2000 {
+            &stderr_total[stderr_total.len() - 2000..]
         } else {
             &stderr_total
         };

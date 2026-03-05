@@ -26,6 +26,7 @@ export interface HostCallbackDeps {
     string,
     { name: string; folder: string; trigger: string }
   >;
+  setTyping?: (jid: string, isTyping: boolean) => Promise<void>;
 }
 
 const MAX_BODY_BYTES = 1_048_576; // 1 MiB
@@ -116,6 +117,20 @@ export function startHostCallbackServer(
           return;
         }
         await deps.sendMessage(jid, text, sender);
+        jsonResponse(res, 200, { status: 'ok' });
+        return;
+      }
+
+      if (url === '/v1/ipc/set-typing') {
+        const jid = data.chat_jid as string;
+        const isTyping = (data.is_typing as boolean) ?? true;
+        if (!jid) {
+          jsonResponse(res, 400, { error: 'Missing chat_jid' });
+          return;
+        }
+        if (deps.setTyping) {
+          await deps.setTyping(jid, isTyping);
+        }
         jsonResponse(res, 200, { status: 'ok' });
         return;
       }

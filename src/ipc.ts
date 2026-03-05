@@ -5,6 +5,7 @@ import { CronExpressionParser } from 'cron-parser';
 
 import {
   DATA_DIR,
+  INTERCOMD_URL,
   IPC_POLL_INTERVAL,
   MAIN_GROUP_FOLDER,
   TIMEZONE,
@@ -32,6 +33,29 @@ export interface IpcDeps {
 
 let ipcWatcherRunning = false;
 
+/**
+ * Fire-and-forget sync of a task operation to Rust's Postgres.
+ * Used after task CRUD in processTaskIpc so Rust scheduler sees the changes.
+ */
+function syncTaskToPostgres(
+  endpoint: string,
+  payload: unknown,
+  method = 'POST',
+): void {
+  if (!INTERCOMD_URL) return;
+  fetch(`${INTERCOMD_URL}/v1/db${endpoint}`, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(3000),
+  }).catch((err) => {
+    logger.debug(
+      { endpoint, err: err?.message },
+      'Task sync to Postgres failed (non-fatal)',
+    );
+  });
+}
+
 export function startIpcWatcher(deps: IpcDeps): void {
   if (ipcWatcherRunning) {
     logger.debug('IPC watcher already running, skipping duplicate start');
@@ -41,6 +65,17 @@ export function startIpcWatcher(deps: IpcDeps): void {
 
   const ipcBaseDir = path.join(DATA_DIR, 'ipc');
   fs.mkdirSync(ipcBaseDir, { recursive: true });
+
+  // When Rust daemon (intercomd) is running, it is the IPC authority.
+  // It polls data/ipc/ and delegates to Node via HTTP. Dual polling causes
+  // non-deterministic races. Node skips IPC polling entirely in this mode.
+  if (INTERCOMD_URL) {
+    logger.info(
+      { intercomdUrl: INTERCOMD_URL },
+      'IPC watcher: Rust daemon is IPC authority, Node skipping IPC polling',
+    );
+    return;
+  }
 
   const processIpcFiles = async () => {
     // Scan all group IPC directories (identity determined by directory)
@@ -159,11 +194,19 @@ export function startIpcWatcher(deps: IpcDeps): void {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               const { uuid, type, params } = data;
               if (!uuid || !type) {
-                logger.warn({ file, sourceGroup }, 'Invalid query file — missing uuid or type');
+                logger.warn(
+                  { file, sourceGroup },
+                  'Invalid query file — missing uuid or type',
+                );
                 fs.unlinkSync(filePath);
                 continue;
               }
-              const response = handleQuery(type, params || {}, sourceGroup, isMain);
+              const response = handleQuery(
+                type,
+                params || {},
+                sourceGroup,
+                isMain,
+              );
               // Write response atomically
               fs.mkdirSync(responsesDir, { recursive: true });
               const responsePath = path.join(responsesDir, `${uuid}.json`);
@@ -190,7 +233,10 @@ export function startIpcWatcher(deps: IpcDeps): void {
           }
         }
       } catch (err) {
-        logger.error({ err, sourceGroup }, 'Error reading IPC queries directory');
+        logger.error(
+          { err, sourceGroup },
+          'Error reading IPC queries directory',
+        );
       }
     }
 
@@ -296,11 +342,9 @@ export async function processTaskIpc(
         }
 
         const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const contextMode =
-          data.context_mode === 'group' || data.context_mode === 'isolated'
-            ? data.context_mode
-            : 'isolated';
-        createTask({
+        const contextMode: 'group' | 'isolated' =
+          data.context_mode === 'group' ? 'group' : 'isolated';
+        const taskPayload = {
           id: taskId,
           group_folder: targetFolder,
           chat_jid: targetJid,
@@ -309,9 +353,11 @@ export async function processTaskIpc(
           schedule_value: data.schedule_value,
           context_mode: contextMode,
           next_run: nextRun,
-          status: 'active',
+          status: 'active' as const,
           created_at: new Date().toISOString(),
-        });
+        };
+        createTask(taskPayload);
+        syncTaskToPostgres('/tasks', taskPayload);
         logger.info(
           { taskId, sourceGroup, targetFolder, contextMode },
           'Task created via IPC',
@@ -324,6 +370,10 @@ export async function processTaskIpc(
         const task = getTaskById(data.taskId);
         if (task && (isMain || task.group_folder === sourceGroup)) {
           updateTask(data.taskId, { status: 'paused' });
+          syncTaskToPostgres('/tasks/update', {
+            id: data.taskId,
+            updates: { status: 'paused' },
+          });
           logger.info(
             { taskId: data.taskId, sourceGroup },
             'Task paused via IPC',
@@ -342,6 +392,10 @@ export async function processTaskIpc(
         const task = getTaskById(data.taskId);
         if (task && (isMain || task.group_folder === sourceGroup)) {
           updateTask(data.taskId, { status: 'active' });
+          syncTaskToPostgres('/tasks/update', {
+            id: data.taskId,
+            updates: { status: 'active' },
+          });
           logger.info(
             { taskId: data.taskId, sourceGroup },
             'Task resumed via IPC',
@@ -360,6 +414,7 @@ export async function processTaskIpc(
         const task = getTaskById(data.taskId);
         if (task && (isMain || task.group_folder === sourceGroup)) {
           deleteTask(data.taskId);
+          syncTaskToPostgres('/tasks/delete', { id: data.taskId });
           logger.info(
             { taskId: data.taskId, sourceGroup },
             'Task cancelled via IPC',

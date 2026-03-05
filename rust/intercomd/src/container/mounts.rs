@@ -6,7 +6,7 @@ use std::fs;
 use std::path::Path;
 
 use intercom_core::{RuntimeKind, VolumeMount, runner_container_path, runner_dir_name};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::security::{ContainerConfig, MountAllowlist, validate_additional_mounts};
 
@@ -182,7 +182,7 @@ pub fn build_volume_mounts(
                     });
                 }
             } else {
-                debug!(
+                warn!(
                     group = %group.name,
                     count = config.additional_mounts.len(),
                     "Skipping additional mounts — no allowlist loaded"

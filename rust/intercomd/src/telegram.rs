@@ -5,6 +5,7 @@ use intercom_core::IntercomConfig;
 use reqwest::Client;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 pub const TELEGRAM_MAX_TEXT_CHARS: usize = 4096;
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
@@ -173,6 +174,25 @@ impl TelegramBridge {
 
     pub fn is_enabled(&self) -> bool {
         self.bot_token.is_some()
+    }
+
+    /// Send "typing..." indicator to a Telegram chat.
+    /// Fire-and-forget: errors are logged but don't propagate.
+    pub async fn send_typing(&self, jid: &str) {
+        let Some(ref token) = self.bot_token else {
+            return;
+        };
+        let chat_id = normalize_chat_id(jid);
+        let endpoint = format!("{TELEGRAM_API_BASE}/bot{token}/sendChatAction");
+        if let Err(e) = self
+            .client
+            .post(&endpoint)
+            .json(&serde_json::json!({"chat_id": chat_id, "action": "typing"}))
+            .send()
+            .await
+        {
+            debug!(jid, err = %e, "sendChatAction failed");
+        }
     }
 
     /// Convenience: send a text message to a JID (chat_id).

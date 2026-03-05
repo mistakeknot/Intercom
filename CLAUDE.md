@@ -27,7 +27,7 @@ npm run build && systemctl --user restart intercom    # Build + restart Node
 npm run rust:build:release && systemctl --user restart intercomd  # Build + restart Rust
 cd container && bash build.sh latest all # Build all container images (intercom-agent:*)
 npm test                                 # Node tests (vitest)
-npm run rust:test                        # Rust tests (129+ tests)
+npm run rust:test                        # Rust tests (161+ tests)
 ```
 
 ## Service Management

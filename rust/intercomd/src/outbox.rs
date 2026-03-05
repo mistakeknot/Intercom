@@ -12,13 +12,38 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use intercom_core::{NewMessage, PgPool};
+use intercom_core::{NewMessage, PgPool, RegisteredGroup, ScheduledTask};
 use serde::Deserialize;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, RwLock};
 use tokio_postgres::NoTls;
 use tracing::{debug, error, info, warn};
 
 use crate::queue::GroupQueue;
+
+use std::collections::HashMap;
+
+// ---------------------------------------------------------------------------
+// Constants — extracted from inline magic numbers for maintainability
+// ---------------------------------------------------------------------------
+
+/// Postgres LISTEN/NOTIFY channel name for outbox insert notifications.
+/// Used in: DDL trigger (persistence.rs), LISTEN command, and drain signal.
+const OUTBOX_CHANNEL: &str = "intercom_outbox";
+
+/// Max rows to claim per drain cycle.
+const DRAIN_CLAIM_LIMIT: i64 = 10;
+
+/// Fallback poll interval when no LISTEN notification arrives.
+const DRAIN_FALLBACK_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Interval between periodic stale row recovery sweeps.
+const STALE_RECOVERY_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Interval between outbox cleanup sweeps (delete old delivered rows).
+const CLEANUP_INTERVAL: Duration = Duration::from_secs(3600);
+
+/// How many days to keep delivered outbox rows before cleanup.
+const CLEANUP_RETENTION_DAYS: i64 = 7;
 
 /// Typed payload for chat_metadata outbox rows.
 #[derive(Debug, Deserialize)]
@@ -34,17 +59,20 @@ struct ChatMetadataPayload {
 pub async fn run_outbox_drain(
     pool: PgPool,
     queue: Arc<GroupQueue>,
+    groups: Arc<RwLock<HashMap<String, RegisteredGroup>>>,
     mut drain_signal: mpsc::Receiver<()>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     // Recover any stale 'processing' rows from a prior crash
     match pool.recover_stale_outbox_rows().await {
-        Ok(count) if count > 0 => info!(count, "recovered stale outbox rows"),
+        Ok(count) if count > 0 => info!(count, "recovered stale outbox rows at startup"),
         Ok(_) => {}
         Err(e) => warn!(err = %e, "failed to recover stale outbox rows"),
     }
 
-    let fallback_interval = Duration::from_secs(30);
+    let fallback_interval = DRAIN_FALLBACK_INTERVAL;
+    let recovery_interval = STALE_RECOVERY_INTERVAL;
+    let mut last_recovery = tokio::time::Instant::now();
 
     loop {
         // Wait for drain signal or fallback timeout
@@ -63,9 +91,19 @@ pub async fn run_outbox_drain(
             }
         }
 
+        // Periodic stale row recovery (every 5 minutes)
+        if last_recovery.elapsed() >= recovery_interval {
+            match pool.recover_stale_outbox_rows().await {
+                Ok(count) if count > 0 => info!(count, "recovered stale outbox rows (periodic)"),
+                Ok(_) => {}
+                Err(e) => warn!(err = %e, "periodic stale outbox recovery failed"),
+            }
+            last_recovery = tokio::time::Instant::now();
+        }
+
         // Drain loop: keep claiming until no rows remain
         loop {
-            let rows = match pool.claim_outbox_rows(10).await {
+            let rows = match pool.claim_outbox_rows(DRAIN_CLAIM_LIMIT).await {
                 Ok(rows) => rows,
                 Err(e) => {
                     error!(err = %e, "failed to claim outbox rows");
@@ -132,6 +170,58 @@ pub async fn run_outbox_drain(
                             }
                         }
                     }
+                    "group_registration" => {
+                        match serde_json::from_value::<RegisteredGroup>(row.payload.clone()) {
+                            Ok(group) => {
+                                let jid = group.jid.clone();
+                                match pool.set_registered_group(&group).await {
+                                    Ok(()) => {
+                                        // Also update in-memory map
+                                        {
+                                            let mut g = groups.write().await;
+                                            g.insert(jid, group);
+                                        }
+                                        if let Err(e) = pool.mark_outbox_delivered(row.id).await {
+                                            error!(id = row.id, err = %e, "failed to mark outbox delivered");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(id = row.id, err = %e, "transient error storing group registration");
+                                        if let Err(e2) = pool.mark_outbox_retry(row.id, &e.to_string()).await {
+                                            error!(id = row.id, err = %e2, "failed to mark outbox retry");
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!(id = row.id, err = %e, "permanent: failed to deserialize group_registration payload");
+                                let _ = pool.mark_outbox_failed(row.id, &e.to_string()).await;
+                            }
+                        }
+                    }
+                    "task" => {
+                        match serde_json::from_value::<ScheduledTask>(row.payload.clone()) {
+                            Ok(task) => {
+                                match pool.create_task(&task).await {
+                                    Ok(()) => {
+                                        if let Err(e) = pool.mark_outbox_delivered(row.id).await {
+                                            error!(id = row.id, err = %e, "failed to mark outbox delivered");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(id = row.id, err = %e, "transient error storing task");
+                                        if let Err(e2) = pool.mark_outbox_retry(row.id, &e.to_string()).await {
+                                            error!(id = row.id, err = %e2, "failed to mark outbox retry");
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!(id = row.id, err = %e, "permanent: failed to deserialize task payload");
+                                let _ = pool.mark_outbox_failed(row.id, &e.to_string()).await;
+                            }
+                        }
+                    }
                     other => {
                         error!(id = row.id, payload_type = other, "permanent: unknown payload_type");
                         let _ = pool.mark_outbox_failed(row.id, &format!("unknown payload_type: {other}")).await;
@@ -165,7 +255,7 @@ fn redact_dsn(dsn: &str) -> String {
 }
 
 /// Run the LISTEN loop. Maintains a dedicated Postgres connection for LISTEN
-/// on the `intercom_outbox` channel. On notification, signals the drain loop.
+/// on the [`OUTBOX_CHANNEL`] channel. On notification, signals the drain loop.
 pub async fn run_listen_loop(
     dsn: String,
     drain_tx: mpsc::Sender<()>,
@@ -217,13 +307,13 @@ pub async fn run_listen_loop(
         });
 
         // Issue LISTEN
-        if let Err(e) = client.execute("LISTEN intercom_outbox", &[]).await {
+        if let Err(e) = client.execute(&format!("LISTEN {OUTBOX_CHANNEL}"), &[]).await {
             warn!(err = %e, "LISTEN command failed");
             conn_handle.abort();
             continue;
         }
 
-        info!("LISTEN active on intercom_outbox");
+        info!(channel = OUTBOX_CHANNEL, "LISTEN active");
 
         // Signal an initial drain in case rows accumulated before LISTEN was established
         let _ = drain_tx.try_send(());
@@ -275,12 +365,10 @@ pub async fn run_listen_loop(
 
 /// Run the outbox cleanup loop. Deletes old delivered rows periodically.
 pub async fn run_outbox_cleanup(pool: PgPool, mut shutdown: watch::Receiver<bool>) {
-    let interval = Duration::from_secs(3600); // 1 hour
-
     loop {
         tokio::select! {
-            _ = tokio::time::sleep(interval) => {
-                match pool.cleanup_outbox(7).await {
+            _ = tokio::time::sleep(CLEANUP_INTERVAL) => {
+                match pool.cleanup_outbox(CLEANUP_RETENTION_DAYS).await {
                     Ok(count) if count > 0 => info!(deleted = count, "outbox cleanup"),
                     Ok(_) => {}
                     Err(e) => warn!(err = %e, "outbox cleanup failed"),

@@ -109,6 +109,24 @@ impl HttpDelegate {
     }
 }
 
+impl HttpDelegate {
+    /// Send typing indicator to a chat JID via the Node host.
+    /// Fire-and-forget: used for WhatsApp typing indicators.
+    pub fn set_typing(&self, jid: &str, is_typing: bool) {
+        let url = format!("{}/v1/ipc/set-typing", self.base_url);
+        let body = serde_json::json!({
+            "chat_jid": jid,
+            "is_typing": is_typing,
+        });
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            if let Err(e) = client.post(&url).json(&body).send().await {
+                debug!(url = %url, err = %e, "set-typing callback failed");
+            }
+        });
+    }
+}
+
 impl IpcDelegate for HttpDelegate {
     fn send_message(&self, chat_jid: &str, text: &str, sender: Option<&str>) {
         let url = format!("{}/v1/ipc/send-message", self.base_url);
@@ -288,6 +306,11 @@ impl IpcWatcher {
     }
 
     /// Process task commands from `{group}/tasks/`.
+    ///
+    /// Authorization rules (matching Node's processTaskIpc):
+    /// - RegisterGroup / RefreshGroups: only main group allowed
+    /// - ScheduleTask: non-main can only target their own group folder
+    /// - PauseTask / ResumeTask / CancelTask: forwarded (Node checks ownership)
     fn process_tasks(&self, group_dir: &Path, ctx: &IpcGroupContext) {
         let tasks_dir = group_dir.join("tasks");
         let files = match read_json_files(&tasks_dir) {
@@ -298,8 +321,10 @@ impl IpcWatcher {
         for file_path in files {
             match read_and_parse::<IpcTask>(&file_path) {
                 Ok(task) => {
-                    self.delegate
-                        .forward_task(&task, &ctx.group_folder, ctx.is_main);
+                    if self.authorize_task(&task, ctx) {
+                        self.delegate
+                            .forward_task(&task, &ctx.group_folder, ctx.is_main);
+                    }
                     remove_file(&file_path);
                 }
                 Err(err) => {
@@ -307,6 +332,57 @@ impl IpcWatcher {
                     move_to_errors(&self.config.ipc_base_dir, &file_path, &ctx.group_folder);
                 }
             }
+        }
+    }
+
+    /// Check if a task is authorized for the source group.
+    fn authorize_task(&self, task: &IpcTask, ctx: &IpcGroupContext) -> bool {
+        match task {
+            IpcTask::RegisterGroup { .. } | IpcTask::RefreshGroups { .. } => {
+                if !ctx.is_main {
+                    warn!(
+                        source_group = ctx.group_folder.as_str(),
+                        task_type = std::any::type_name::<IpcTask>(),
+                        "Unauthorized task attempt blocked (main-only)"
+                    );
+                    return false;
+                }
+                true
+            }
+            IpcTask::ScheduleTask { target_jid, .. } => {
+                if ctx.is_main {
+                    return true;
+                }
+                // Non-main: target must belong to the source group
+                if let Some(jid) = target_jid {
+                    match self.registry.folder_for_jid(jid) {
+                        Some(folder) if folder == ctx.group_folder => true,
+                        Some(folder) => {
+                            warn!(
+                                source_group = ctx.group_folder.as_str(),
+                                target_folder = folder.as_str(),
+                                target_jid = jid.as_str(),
+                                "Unauthorized schedule_task attempt blocked"
+                            );
+                            false
+                        }
+                        None => {
+                            warn!(
+                                target_jid = jid.as_str(),
+                                "schedule_task target group not registered"
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    // No target JID — forwarded, Node will validate
+                    true
+                }
+            }
+            // Pause/Resume/Cancel: Node validates task ownership
+            IpcTask::PauseTask { .. }
+            | IpcTask::ResumeTask { .. }
+            | IpcTask::CancelTask { .. } => true,
         }
     }
 
@@ -647,15 +723,41 @@ fn remove_file(path: &Path) {
 
 /// Thread-safe registry tracking which chat JIDs belong to which group folders.
 /// Used for authorization of non-main message sends.
-#[derive(Debug, Default, Clone)]
+///
+/// Primary source: periodic sync from Node host callback server.
+/// Fallback: Rust in-memory groups map (updated immediately on registration via
+/// `/v1/db/groups/set-sync`). This eliminates the 10s stale window for newly
+/// registered groups.
+#[derive(Debug, Clone)]
 pub struct GroupRegistry {
-    /// Map from chat_jid → group_folder.
+    /// Map from chat_jid → group_folder (populated by periodic Node sync).
     jid_to_folder: Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>,
+    /// Fallback: Rust's in-memory groups map, updated via HTTP from Node on registration.
+    groups_fallback:
+        Option<Arc<tokio::sync::RwLock<std::collections::HashMap<String, intercom_core::RegisteredGroup>>>>,
+}
+
+impl Default for GroupRegistry {
+    fn default() -> Self {
+        Self {
+            jid_to_folder: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            groups_fallback: None,
+        }
+    }
 }
 
 impl GroupRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_fallback(
+        groups: Arc<tokio::sync::RwLock<std::collections::HashMap<String, intercom_core::RegisteredGroup>>>,
+    ) -> Self {
+        Self {
+            jid_to_folder: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            groups_fallback: Some(groups),
+        }
     }
 
     pub fn update_from_map(&self, groups: std::collections::HashMap<String, String>) {
@@ -664,8 +766,22 @@ impl GroupRegistry {
     }
 
     pub fn folder_for_jid(&self, chat_jid: &str) -> Option<String> {
-        let map = self.jid_to_folder.read().unwrap();
-        map.get(chat_jid).cloned()
+        // Primary: periodic sync map
+        {
+            let map = self.jid_to_folder.read().unwrap();
+            if let Some(folder) = map.get(chat_jid) {
+                return Some(folder.clone());
+            }
+        }
+        // Fallback: Rust in-memory groups (updated immediately on registration)
+        if let Some(ref groups) = self.groups_fallback {
+            if let Ok(g) = groups.try_read() {
+                if let Some(rg) = g.get(chat_jid) {
+                    return Some(rg.folder.clone());
+                }
+            }
+        }
+        None
     }
 
     pub fn len(&self) -> usize {

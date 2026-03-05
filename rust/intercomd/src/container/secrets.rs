@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Secret key names for each runtime.
 const SECRET_KEYS: &[&str] = &[
@@ -118,6 +118,7 @@ pub fn build_container_args(
         "run".to_string(),
         "-i".to_string(),
         "--rm".to_string(),
+        "--pull=never".to_string(),
         "--name".to_string(),
         container_name.to_string(),
     ];
@@ -151,6 +152,15 @@ pub fn build_container_args(
 
         // Overlay excluded subdirectories with empty tmpfs
         for subdir in &mount.exclude {
+            if subdir.is_empty()
+                || subdir.contains("..")
+                || subdir.contains('/')
+                || subdir.contains('\\')
+                || subdir.contains(',')
+            {
+                warn!(subdir, host_path = mount.host_path.as_str(), "skipping invalid exclude value");
+                continue;
+            }
             args.push("--mount".to_string());
             args.push(format!(
                 "type=tmpfs,destination={}/{},tmpfs-size=0",

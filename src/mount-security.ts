@@ -19,9 +19,11 @@ const logger = pino({
   transport: { target: 'pino-pretty', options: { colorize: true } },
 });
 
-// Cache the allowlist in memory - only reloads on process restart
+// Cache the allowlist in memory. Positive cache is permanent (reload on restart).
+// Negative cache expires after 60s so a newly created file is picked up.
 let cachedAllowlist: MountAllowlist | null = null;
-let allowlistLoadError: string | null = null;
+let allowlistMissingSince: number | null = null;
+const NEGATIVE_CACHE_TTL_MS = 60_000;
 
 /**
  * Default blocked patterns - paths that should never be mounted
@@ -59,14 +61,17 @@ export function loadMountAllowlist(): MountAllowlist | null {
     return cachedAllowlist;
   }
 
-  if (allowlistLoadError !== null) {
-    // Already tried and failed, don't spam logs
-    return null;
+  // Negative cache: re-check after TTL so a newly created file is picked up
+  if (allowlistMissingSince !== null) {
+    if (Date.now() - allowlistMissingSince < NEGATIVE_CACHE_TTL_MS) {
+      return null;
+    }
+    allowlistMissingSince = null; // TTL expired, try again
   }
 
   try {
     if (!fs.existsSync(MOUNT_ALLOWLIST_PATH)) {
-      allowlistLoadError = `Mount allowlist not found at ${MOUNT_ALLOWLIST_PATH}`;
+      allowlistMissingSince = Date.now();
       logger.warn(
         { path: MOUNT_ALLOWLIST_PATH },
         'Mount allowlist not found - additional mounts will be BLOCKED. ' +
@@ -109,11 +114,12 @@ export function loadMountAllowlist(): MountAllowlist | null {
 
     return cachedAllowlist;
   } catch (err) {
-    allowlistLoadError = err instanceof Error ? err.message : String(err);
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    allowlistMissingSince = Date.now();
     logger.error(
       {
         path: MOUNT_ALLOWLIST_PATH,
-        error: allowlistLoadError,
+        error: errorMsg,
       },
       'Failed to load mount allowlist - additional mounts will be BLOCKED',
     );

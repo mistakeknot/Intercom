@@ -20,6 +20,13 @@ import {
 
 // Fire-and-forget POST to intercomd for Postgres dual-write.
 // Failures are logged but never block the SQLite write path.
+//
+// LIFECYCLE NOTE: This is a legacy fallback path. The primary delivery path
+// is the Postgres outbox (writeToOutbox). dualWriteToPostgres is only called
+// when the outbox write fails (e.g. Postgres unavailable). Once the outbox
+// path is proven stable in production, this function can be removed. Messages
+// sent via this path are NOT deduplicated against the outbox — the Rust drain
+// uses INSERT ON CONFLICT which prevents duplicates at the destination table.
 function dualWriteToPostgres(endpoint: string, payload: unknown): void {
   fetch(`${INTERCOMD_URL}/v1/db${endpoint}`, {
     method: 'POST',
@@ -296,10 +303,19 @@ export function setLastGroupSync(): void {
 }
 
 /**
- * Store a message with full content.
- * Only call this for registered groups where message history is needed.
+ * Shared helper: write a message to SQLite and fan out to Postgres outbox.
+ * Consolidates the duplicate logic from storeMessage/storeMessageDirect.
  */
-export function storeMessage(msg: NewMessage): void {
+function storeMessageInternal(msg: {
+  id: string;
+  chat_jid: string;
+  sender: string;
+  sender_name: string;
+  content: string;
+  timestamp: string;
+  is_from_me?: boolean;
+  is_bot_message?: boolean;
+}): void {
   db.prepare(
     `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
@@ -334,6 +350,14 @@ export function storeMessage(msg: NewMessage): void {
 }
 
 /**
+ * Store a message with full content.
+ * Only call this for registered groups where message history is needed.
+ */
+export function storeMessage(msg: NewMessage): void {
+  storeMessageInternal(msg);
+}
+
+/**
  * Store a message directly (for non-WhatsApp channels that don't use Baileys proto).
  */
 export function storeMessageDirect(msg: {
@@ -346,37 +370,7 @@ export function storeMessageDirect(msg: {
   is_from_me: boolean;
   is_bot_message?: boolean;
 }): void {
-  db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    msg.id,
-    msg.chat_jid,
-    msg.sender,
-    msg.sender_name,
-    msg.content,
-    msg.timestamp,
-    msg.is_from_me ? 1 : 0,
-    msg.is_bot_message ? 1 : 0,
-  );
-  const payload = {
-    id: msg.id,
-    chat_jid: msg.chat_jid,
-    sender: msg.sender,
-    sender_name: msg.sender_name,
-    content: msg.content,
-    timestamp: msg.timestamp,
-    is_from_me: !!msg.is_from_me,
-    is_bot_message: !!msg.is_bot_message,
-  };
-  writeToOutbox(msg.chat_jid, 'message', payload).then((wrote) => {
-    if (!wrote) {
-      logger.warn(
-        { chat_jid: msg.chat_jid },
-        'outbox write failed, falling back to HTTP',
-      );
-      dualWriteToPostgres('/messages', payload);
-    }
-  });
+  storeMessageInternal(msg);
 }
 
 /**

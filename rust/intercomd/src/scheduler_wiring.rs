@@ -221,6 +221,20 @@ async fn run_scheduled_task(
         "running scheduled task"
     );
 
+    let on_spawn: Option<Arc<crate::container::runner::OnSpawnCallback>> = {
+        let q = queue.clone();
+        let jid = task.chat_jid.clone();
+        let folder = group.folder.clone();
+        Some(Arc::new(Box::new(move |container_name: String| {
+            let q = q.clone();
+            let jid = jid.clone();
+            let folder = folder.clone();
+            Box::pin(async move {
+                q.register_process(&jid, &container_name, Some(folder.as_str())).await;
+            })
+        })))
+    };
+
     let container_result = run_container_agent(
         &group_info,
         &input,
@@ -228,6 +242,7 @@ async fn run_scheduled_task(
         is_main,
         run_config,
         on_output,
+        on_spawn,
     )
     .await;
 
