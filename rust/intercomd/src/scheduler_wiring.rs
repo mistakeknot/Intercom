@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use intercom_core::{ContainerInput, ContainerOutput, ContainerStatus, PgPool, RegisteredGroup};
+use intercom_core::{ContainerInput, ContainerOutput, ContainerStatus, NewMessage, PgPool, RegisteredGroup};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
@@ -110,6 +110,9 @@ async fn run_scheduled_task(
 
     let runtime = resolve_runtime(&group);
 
+    // Clone before assistant_name is moved into ContainerInput
+    let assistant_name_cb = assistant_name.clone();
+
     let input = ContainerInput {
         prompt: task.prompt.clone(),
         session_id,
@@ -138,6 +141,7 @@ async fn run_scheduled_task(
     let queue_cb = queue.clone();
     let chat_jid_cb = task.chat_jid.clone();
     let group_folder_cb = task.group_folder.clone();
+    let task_id_cb = task.id.clone();
 
     let result_text: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
     let error_text: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
@@ -152,6 +156,8 @@ async fn run_scheduled_task(
             let queue = queue_cb.clone();
             let chat_jid = chat_jid_cb.clone();
             let group_folder = group_folder_cb.clone();
+            let task_id_cb = task_id_cb.clone();
+            let assistant_name_cb = assistant_name_cb.clone();
             let result_cb = result_cb.clone();
             let error_cb = error_cb.clone();
 
@@ -165,9 +171,25 @@ async fn run_scheduled_task(
                     }
                 }
 
-                // Send results to user
+                // Persist before deliver: store output in Postgres first so it
+                // survives delivery failures or process crashes
                 if let Some(ref text) = output.result {
                     if !text.is_empty() {
+                        let bot_msg = intercom_core::NewMessage {
+                            id: format!("task-{}-{}", task_id_cb, chrono::Utc::now().timestamp_millis()),
+                            chat_jid: chat_jid.clone(),
+                            sender: "bot".into(),
+                            sender_name: assistant_name_cb.clone(),
+                            content: text.clone(),
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            is_from_me: true,
+                            is_bot_message: true,
+                        };
+                        if let Err(e) = pool.store_message(&bot_msg).await {
+                            warn!(err = %e, "failed to persist task output");
+                        }
+
+                        // Deliver via Telegram
                         if let Err(e) = telegram.send_text_to_jid(&chat_jid, text).await {
                             error!(err = %e, "failed to send task output via Telegram");
                         }

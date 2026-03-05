@@ -293,32 +293,33 @@ async fn process_group_messages(
                     // Strip <internal>...</internal> blocks
                     let text = strip_internal_blocks(result_text);
                     if !text.is_empty() {
-                        // Stop typing refresh before sending — prevents race where
-                        // a refresh fires between message delivery and handle abort
-                        typing_cancel.notify_one();
-                        info!(jid = %chat_jid, "sending agent output, typing cancelled");
-
-                        // Send via Telegram
-                        if let Err(e) = telegram
-                            .send_text_to_jid(&chat_jid, &text)
-                            .await
-                        {
-                            error!(err = %e, "failed to send agent output via Telegram");
-                        }
-
-                        // Store bot response in Postgres
+                        // Persist before deliver: store in Postgres first so output
+                        // survives delivery failures or process crashes
                         let bot_msg = intercom_core::NewMessage {
                             id: format!("bot-{}", chrono::Utc::now().timestamp_millis()),
                             chat_jid: chat_jid.clone(),
                             sender: "bot".into(),
                             sender_name: assistant_name.clone(),
-                            content: text,
+                            content: text.clone(),
                             timestamp: chrono::Utc::now().to_rfc3339(),
                             is_from_me: true,
                             is_bot_message: true,
                         };
                         if let Err(e) = pool.store_message(&bot_msg).await {
                             warn!(err = %e, "failed to store bot response");
+                        }
+
+                        // Stop typing refresh before sending — prevents race where
+                        // a refresh fires between message delivery and handle abort
+                        typing_cancel.notify_one();
+                        info!(jid = %chat_jid, "sending agent output, typing cancelled");
+
+                        // Deliver via Telegram
+                        if let Err(e) = telegram
+                            .send_text_to_jid(&chat_jid, &text)
+                            .await
+                        {
+                            error!(err = %e, "failed to send agent output via Telegram");
                         }
 
                         output_sent.store(true, std::sync::atomic::Ordering::SeqCst);
