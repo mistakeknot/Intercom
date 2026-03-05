@@ -19,6 +19,28 @@ export interface QueryResponse {
 }
 
 /**
+ * Build an extended PATH that includes common user-local bin directories.
+ * Ensures CLIs installed in ~/.local/bin, ~/.cargo/bin, etc. are found
+ * even when the service runs with a minimal systemd PATH.
+ */
+function buildExtendedPath(): string {
+  const base = process.env.PATH || '';
+  const home = process.env.HOME || '/root';
+  const extraDirs = [
+    `${home}/.local/bin`,
+    `${home}/.cargo/bin`,
+    '/usr/local/bin',
+  ];
+  const parts = base.split(':');
+  for (const dir of extraDirs) {
+    if (!parts.includes(dir)) {
+      parts.push(dir);
+    }
+  }
+  return parts.join(':');
+}
+
+/**
  * Execute a CLI command safely (no shell). Returns stdout or null on failure.
  */
 function execCli(bin: string, args: string[]): string | null {
@@ -26,7 +48,7 @@ function execCli(bin: string, args: string[]): string | null {
     return execFileSync(bin, args, {
       encoding: 'utf-8',
       timeout: 15_000,
-      env: { ...process.env, PATH: `${process.env.PATH}:/usr/local/bin` },
+      env: { ...process.env, PATH: buildExtendedPath() },
     }).trim();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -37,10 +59,15 @@ function execCli(bin: string, args: string[]): string | null {
 
 /**
  * Check if a CLI tool is available on the host.
+ * Uses the extended PATH to find CLIs in common user-local directories.
  */
 function isCliAvailable(bin: string): boolean {
   try {
-    execFileSync('which', [bin], { encoding: 'utf-8', timeout: 5000 });
+    execFileSync('which', [bin], {
+      encoding: 'utf-8',
+      timeout: 5000,
+      env: { ...process.env, PATH: buildExtendedPath() },
+    });
     return true;
   } catch {
     return false;

@@ -590,7 +590,9 @@ impl DemarchAdapter {
         use std::process::Stdio;
 
         let mut cmd = Command::new(bin);
-        cmd.args(args).current_dir(&self.project_root);
+        cmd.args(args)
+            .current_dir(&self.project_root)
+            .env("PATH", build_extended_path());
 
         if stdin_data.is_some() {
             cmd.stdin(Stdio::piped());
@@ -678,12 +680,36 @@ impl DemarchAdapter {
     }
 }
 
+/// Check if a CLI tool is available, searching both the system PATH and
+/// common user-local bin directories that may not be in the service's PATH
+/// (e.g. when intercomd runs as a systemd service with a minimal environment).
 fn is_cli_available(bin: &str) -> bool {
+    let extended_path = build_extended_path();
     Command::new("which")
         .arg(bin)
+        .env("PATH", &extended_path)
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+/// Build an extended PATH that includes common user-local bin directories.
+/// Appends ~/.local/bin, ~/.cargo/bin, and /usr/local/bin to the existing PATH.
+fn build_extended_path() -> String {
+    let base = std::env::var("PATH").unwrap_or_default();
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let extra_dirs = [
+        format!("{home}/.local/bin"),
+        format!("{home}/.cargo/bin"),
+        "/usr/local/bin".to_string(),
+    ];
+    let mut parts: Vec<&str> = base.split(':').collect();
+    for dir in &extra_dirs {
+        if !parts.contains(&dir.as_str()) {
+            parts.push(dir);
+        }
+    }
+    parts.join(":")
 }
 
 #[cfg(test)]
