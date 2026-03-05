@@ -38,7 +38,7 @@ use telegram::{
     TelegramSendResponse,
 };
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Parser, Debug)]
 #[command(name = "intercomd", version, about = "Intercom Rust daemon skeleton")]
@@ -384,6 +384,33 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
                 run_config.clone(),
             );
             state.queue.set_process_messages_fn(process_fn).await;
+
+            // Startup recovery: check for messages that arrived but were never
+            // dispatched to an agent (e.g. intercomd crashed mid-container).
+            // The outbox stale recovery handles message_outbox rows, but this
+            // handles the gap between "message stored in messages table" and
+            // "agent actually processed it" — GroupQueue state is in-memory and
+            // lost on crash.
+            {
+                let groups_snap = state.groups.read().await;
+                let ts = state.agent_timestamps.read().await;
+                let mut recovered = 0u32;
+                for (jid, _group) in groups_snap.iter() {
+                    let cursor = ts.0.get(jid).cloned().unwrap_or_default();
+                    match pool.count_pending_messages(jid, &cursor, &assistant_name).await {
+                        Ok(count) if count > 0 => {
+                            info!(group_jid = %jid, pending = count, "recovering unprocessed messages from prior crash");
+                            state.queue.enqueue_message_check(jid).await;
+                            recovered += 1;
+                        }
+                        Ok(_) => {}
+                        Err(e) => warn!(group_jid = %jid, err = %e, "startup pending message check failed"),
+                    }
+                }
+                if recovered > 0 {
+                    info!(groups_recovered = recovered, "startup message recovery complete");
+                }
+            }
 
             if state.config.orchestrator.use_outbox {
                 // Outbox mode: drain loop + LISTEN/NOTIFY

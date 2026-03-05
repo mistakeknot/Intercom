@@ -686,6 +686,43 @@ impl PgPool {
         .await
     }
 
+    /// Count unprocessed messages for a group since its cursor timestamp.
+    /// Used at startup to detect messages that arrived but were never
+    /// dispatched to an agent (e.g. due to crash during container execution).
+    pub async fn count_pending_messages(
+        &self,
+        chat_jid: &str,
+        since_timestamp: &str,
+        bot_prefix: &str,
+    ) -> anyhow::Result<i64> {
+        self.with_client(|client| {
+            let chat_jid = chat_jid.to_string();
+            let since_timestamp = if since_timestamp.is_empty() {
+                "1970-01-01T00:00:00Z".to_string()
+            } else {
+                since_timestamp.to_string()
+            };
+            let bot_prefix = format!("{}:%", bot_prefix);
+            Box::pin(async move {
+                let row = client
+                    .query_one(
+                        "\
+                        SELECT COUNT(*) AS cnt
+                        FROM messages
+                        WHERE chat_jid = $1 AND timestamp > $2::text::timestamptz
+                          AND is_bot_message = FALSE AND content NOT LIKE $3
+                          AND content != '' AND content IS NOT NULL
+                        ",
+                        &[&chat_jid, &since_timestamp, &bot_prefix],
+                    )
+                    .await
+                    .context("count_pending_messages")?;
+                Ok(row.get::<_, i64>("cnt"))
+            })
+        })
+        .await
+    }
+
     // -----------------------------------------------------------------------
     // Scheduled task operations
     // -----------------------------------------------------------------------
