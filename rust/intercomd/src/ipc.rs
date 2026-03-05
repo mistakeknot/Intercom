@@ -282,6 +282,23 @@ impl IpcWatcher {
                             &msg.text,
                             msg.sender.as_deref(),
                         );
+                        // Append to sent_messages.log for container log capture
+                        let sent_log = group_dir.join("sent_messages.log");
+                        let ts = chrono::Utc::now().format("%H:%M:%S");
+                        let entry = format!(
+                            "[{}] → {}: {}\n",
+                            ts,
+                            msg.chat_jid,
+                            msg.text.chars().take(2000).collect::<String>(),
+                        );
+                        if let Err(e) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&sent_log)
+                            .and_then(|mut f| std::io::Write::write_all(&mut f, entry.as_bytes()))
+                        {
+                            debug!(err = %e, "failed to append to sent_messages.log");
+                        }
                         debug!(
                             chat_jid = %msg.chat_jid,
                             group = %ctx.group_folder,

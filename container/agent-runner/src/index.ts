@@ -8,44 +8,23 @@
  *          Files: {type:"message", text:"..."}.json — polled and consumed
  *          Sentinel: /workspace/ipc/input/_close — signals session end
  *
- * Stdout protocol:
- *   Each result is wrapped in OUTPUT_START_MARKER / OUTPUT_END_MARKER pairs.
- *   Multiple results may be emitted (one per agent teams result).
- *   Final marker after loop ends signals completion.
+ * Output protocol:
+ *   Prefers UDS (Unix domain socket) at /workspace/ipc/output.sock with
+ *   length-prefixed frames. Falls back to stdout OUTPUT_START/END markers.
  */
 
 import fs from 'fs';
 import path from 'path';
 import { query, HookCallback, PreCompactHookInput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
-
-interface ContainerInput {
-  prompt: string;
-  sessionId?: string;
-  groupFolder: string;
-  chatJid: string;
-  isMain: boolean;
-  isScheduledTask?: boolean;
-  assistantName?: string;
-  model?: string;
-  secrets?: Record<string, string>;
-}
-
-interface StreamEvent {
-  type: 'tool_start' | 'text_delta';
-  toolName?: string;
-  toolInput?: string;
-  text?: string;
-}
-
-interface ContainerOutput {
-  status: 'success' | 'error';
-  result: string | null;
-  newSessionId?: string;
-  model?: string;
-  error?: string;
-  event?: StreamEvent;
-}
+import {
+  ContainerInput,
+  ContainerOutput,
+  writeOutput,
+  initUdsOutput,
+  closeUdsOutput,
+  log,
+} from '../../shared/protocol.js';
 
 interface SessionEntry {
   sessionId: string;
@@ -116,21 +95,8 @@ async function readStdin(): Promise<string> {
   });
 }
 
-const OUTPUT_START_MARKER = '---INTERCOM_OUTPUT_START---';
-const OUTPUT_END_MARKER = '---INTERCOM_OUTPUT_END---';
-
-function writeOutput(output: ContainerOutput): void {
-  console.log(OUTPUT_START_MARKER);
-  console.log(JSON.stringify(output));
-  console.log(OUTPUT_END_MARKER);
-}
-
 function truncate(s: string, max: number): string {
   return s.length <= max ? s : s.slice(0, max) + '...';
-}
-
-function log(message: string): void {
-  console.error(`[agent-runner] ${message}`);
 }
 
 function getSessionSummary(sessionId: string, transcriptPath: string): string | null {
@@ -568,6 +534,9 @@ async function main(): Promise<void> {
   // Clean up stale _close sentinel from previous container runs
   try { fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL); } catch { /* ignore */ }
 
+  // Connect to UDS output socket if available (falls back to stdout markers)
+  await initUdsOutput();
+
   // Build initial prompt (drain any pending IPC messages too)
   let prompt = containerInput.prompt;
   if (containerInput.isScheduledTask) {
@@ -628,8 +597,11 @@ async function main(): Promise<void> {
       newSessionId: sessionId,
       error: errorMessage
     });
+    closeUdsOutput();
     process.exit(1);
   }
+
+  closeUdsOutput();
 }
 
 main();

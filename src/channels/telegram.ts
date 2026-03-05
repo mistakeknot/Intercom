@@ -395,7 +395,10 @@ export class TelegramChannel implements Channel {
   }
 
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
-    if (!this.bot || !isTyping) return;
+    if (!this.bot) return;
+    // Telegram has no explicit "stop typing" API — the indicator auto-clears
+    // after ~5s or when a message is sent. We only act on isTyping=true.
+    if (!isTyping) return;
     try {
       const numericId = jid.replace(/^tg:/, '');
       await this.bot.api.sendChatAction(numericId, 'typing');

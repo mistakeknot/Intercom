@@ -150,17 +150,15 @@ pub fn build_volume_mounts(
         });
     }
 
-    // Non-Claude runtimes also need the shared code mounted.
-    if runtime != RuntimeKind::Claude {
-        let shared_src = project_root.join("container").join("shared");
-        if shared_src.exists() {
-            mounts.push(VolumeMount {
-                host_path: shared_src.to_string_lossy().to_string(),
-                container_path: "/app/shared".to_string(),
-                readonly: true,
-                exclude: vec![],
-            });
-        }
+    // All runtimes need the shared code mounted for live recompilation.
+    let shared_src = project_root.join("container").join("shared");
+    if shared_src.exists() {
+        mounts.push(VolumeMount {
+            host_path: shared_src.to_string_lossy().to_string(),
+            container_path: "/app/shared".to_string(),
+            readonly: true,
+            exclude: vec![],
+        });
     }
 
     // Additional mounts validated against external allowlist.

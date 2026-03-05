@@ -20,7 +20,7 @@ use std::time::Duration;
 use intercom_core::{
     ContainerInput, ContainerOutput, ContainerStatus, PgPool, RegisteredGroup, RuntimeKind,
 };
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -212,20 +212,34 @@ async fn process_group_messages(
         write_snapshots(&run_config.data_dir, &group.folder, is_main, &tasks_json, &groups_json).await;
     }
 
+    // Track whether we sent any output to the user
+    let output_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let output_sent_cb = output_sent.clone();
+
     // 5c. Send typing indicator and start periodic refresh
     let is_telegram = chat_jid.starts_with("tg:");
     if is_telegram {
         telegram.send_typing(chat_jid).await;
     }
+    let typing_cancel = Arc::new(Notify::new());
     let typing_handle: Option<JoinHandle<()>> = if is_telegram {
         let tg = telegram.clone();
         let jid = chat_jid.to_string();
+        let cancel = typing_cancel.clone();
         Some(tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(4));
             interval.tick().await; // skip immediate first tick
             loop {
-                interval.tick().await;
-                tg.send_typing(&jid).await;
+                tokio::select! {
+                    _ = interval.tick() => {
+                        debug!(jid = %jid, "typing refresh tick");
+                        tg.send_typing(&jid).await;
+                    }
+                    _ = cancel.notified() => {
+                        info!(jid = %jid, "typing refresh cancelled");
+                        break;
+                    }
+                }
             }
         }))
     } else {
@@ -238,13 +252,10 @@ async fn process_group_messages(
     let queue_clone: Arc<GroupQueue> = queue.clone();
     let chat_jid_owned = chat_jid.to_string();
 
-    // Track whether we sent any output to the user
-    let output_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let output_sent_cb = output_sent.clone();
-
     let telegram_cb: Arc<TelegramBridge> = telegram.clone();
     let pool_cb = pool.clone();
     let assistant_name_cb = assistant_name.to_string();
+    let typing_cancel_cb = typing_cancel.clone();
 
     let on_output: Option<Arc<OutputCallback>> = Some(Arc::new(Box::new(
         move |output: ContainerOutput| {
@@ -256,6 +267,7 @@ async fn process_group_messages(
             let pool = pool_cb.clone();
             let assistant_name = assistant_name_cb.clone();
             let output_sent = output_sent_cb.clone();
+            let typing_cancel = typing_cancel_cb.clone();
 
             Box::pin(async move {
                 debug!(
@@ -281,6 +293,11 @@ async fn process_group_messages(
                     // Strip <internal>...</internal> blocks
                     let text = strip_internal_blocks(result_text);
                     if !text.is_empty() {
+                        // Stop typing refresh before sending — prevents race where
+                        // a refresh fires between message delivery and handle abort
+                        typing_cancel.notify_one();
+                        info!(jid = %chat_jid, "sending agent output, typing cancelled");
+
                         // Send via Telegram
                         if let Err(e) = telegram
                             .send_text_to_jid(&chat_jid, &text)
@@ -343,7 +360,8 @@ async fn process_group_messages(
     )
     .await;
 
-    // Stop typing indicator refresh
+    // Stop typing indicator refresh (belt-and-suspenders with Notify)
+    typing_cancel.notify_one();
     if let Some(handle) = typing_handle {
         handle.abort();
     }

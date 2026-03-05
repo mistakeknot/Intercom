@@ -108,12 +108,9 @@ pub fn runner_dir_name(runtime: RuntimeKind) -> &'static str {
 }
 
 /// Container mount path for runner source code.
-/// Claude uses flat layout at `/app/src`, others use nested layout.
+/// All runtimes use nested layout at `/app/{runner}/src`.
 pub fn runner_container_path(runtime: RuntimeKind) -> String {
-    match runtime {
-        RuntimeKind::Claude => "/app/src".to_string(),
-        _ => format!("/app/{}/src", runner_dir_name(runtime)),
-    }
+    format!("/app/{}/src", runner_dir_name(runtime))
 }
 
 /// Parses OUTPUT marker pairs from a byte buffer.
@@ -272,7 +269,7 @@ mod tests {
 
     #[test]
     fn runner_container_paths() {
-        assert_eq!(runner_container_path(RuntimeKind::Claude), "/app/src");
+        assert_eq!(runner_container_path(RuntimeKind::Claude), "/app/agent-runner/src");
         assert_eq!(runner_container_path(RuntimeKind::Gemini), "/app/gemini-runner/src");
         assert_eq!(runner_container_path(RuntimeKind::Codex), "/app/codex-runner/src");
     }

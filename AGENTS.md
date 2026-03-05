@@ -28,6 +28,8 @@ Telegram / WhatsApp
 
 **IronClaw**: intercomd is the orchestrator — handles the full message loop, container spawning, scheduling, and Telegram bridge natively in Rust. Node serves as the channel layer: receives messages from WhatsApp/Telegram, routes commands, and delegates container spawning back to intercomd via HTTP callbacks. The `orchestrator.enabled` flag in `intercom.toml` controls whether Rust runs the message loop (requires Postgres; sidecar mode when disabled).
 
+**Container Output**: Containers prefer Unix domain sockets (UDS) for output when available, falling back to stdout `OUTPUT_START/END` markers for backward compatibility. The host binds a `UnixListener` at `{data_dir}/ipc/{group}/output.sock` before spawning each container. The container connects and sends length-prefixed frames (4-byte big-endian length + JSON payload, max 4 MiB). UDS eliminates marker-splitting bugs from partial reads, embedded newlines, and large output truncation. Protocol implementation: `container/shared/protocol.ts` (client), `rust/intercomd/src/container/runner.rs` (server).
+
 **Outbox**: When `orchestrator.use_outbox=true`, message delivery uses a durable write path instead of polling. Node writes to the `message_outbox` Postgres table (via `pg-writer.ts`), a Postgres trigger fires `NOTIFY intercom_outbox`, and the Rust LISTEN loop (`outbox.rs`) signals the drain loop to claim rows, store messages, and enqueue processing. This replaces the legacy polling-based message loop.
 
 ## Architecture Reference
@@ -81,7 +83,7 @@ cd container && bash build.sh latest gemini  # Build single runtime
 
 ### Hot Reload
 
-Runner source is bind-mounted from host into containers and recompiled on startup. Edit `container/*/src/*.ts` or `container/shared/*.ts` — changes take effect on next container spawn without rebuilding Docker images.
+Runner source and shared code are bind-mounted from host into all containers (`/app/{runner}/src` and `/app/shared`) and recompiled on startup. Edit `container/*/src/*.ts` or `container/shared/*.ts` — changes take effect on next container spawn without rebuilding Docker images.
 
 ### Container Rebuild Rule
 
@@ -108,7 +110,8 @@ Rust orchestration requires Postgres (`orchestrator.enabled=true` + `postgres_ds
 - **INTERCOM_POSTGRES_DSN required for outbox**: Node's `pg-writer.ts` needs `INTERCOM_POSTGRES_DSN` in `.env` to write to the outbox. Without it, messages fall back to HTTP POST (`/v1/db/messages`) which stores but does NOT trigger processing in outbox mode. Messages silently accumulate without being dispatched.
 - **cleanupOrphans exclusion**: `container-runtime.ts` has a `CLEANUP_EXCLUDE` set containing `intercom-postgres`. Without this, the orphan cleanup kills the Postgres infrastructure container on every Node restart.
 - **--pull=never on container spawn**: `secrets.rs` passes `--pull=never` to Docker. Container images must be pre-built locally (`bash build.sh latest all`). Docker will NOT pull from a registry — missing images cause immediate failure.
-- **Container startup timeout**: A 30-second watchdog kills containers that produce no stdout output. If a container image is broken or hangs during init, it fast-fails instead of blocking the group queue indefinitely. The watchdog transitions to activity-based timeout after first output.
+- **Container startup timeout**: A 30-second watchdog kills containers that produce no output (via UDS or stdout). If a container image is broken or hangs during init, it fast-fails instead of blocking the group queue indefinitely. The watchdog transitions to activity-based timeout after first output.
+- **UDS fallback**: If the UDS socket doesn't exist (old host) or the container can't connect (timeout 2s), it silently falls back to stdout markers. Look for `UDS output connected` in container stderr or `UDS connection accepted` in intercomd logs to confirm UDS is active.
 - **Outbox stale recovery**: Rows stuck in `processing` state (from crashes) are recovered at startup and every 5 minutes. If you see duplicate message processing after a crash, this is the recovery mechanism working as intended.
 - **Dual-database state**: Node reads groups from SQLite (`store/messages.db`), Rust reads from Postgres. Both have `registered_groups` tables. When modifying group config (e.g. `container_config`), update **both** databases or the change is invisible to one side. Postgres is the production truth when the orchestrator is enabled.
 - **Queue drain after container exit**: `queue.rs` drains pending messages/tasks after every container completion via `drain_pending()`. If you modify `reset_group()` or the run loop, ensure drain still runs — without it, messages arriving during an active container are silently dropped after the container exits.

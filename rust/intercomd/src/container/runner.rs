@@ -2,8 +2,10 @@
 //!
 //! Port of `runContainerAgent()` from container-runner.ts.
 //!
-//! Uses tokio::process for async spawning, streams stdout for OUTPUT marker
-//! pairs, manages activity-based timeouts, and handles graceful stop.
+//! Output channel: prefers Unix domain socket (length-prefixed frames) when the
+//! container connects to `{ipc_dir}/output.sock`. Falls back to stdout OUTPUT
+//! marker pairs for backward compatibility. Manages activity-based timeouts and
+//! handles graceful stop.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,7 +16,8 @@ use intercom_core::{
     ContainerInput, ContainerOutput, ContainerStatus, RuntimeKind, VolumeMount,
     container_image, extract_output_markers,
 };
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixListener;
 use tokio::process::Command;
 use tokio::sync::{Mutex, watch};
 use tracing::{debug, error, info, warn};
@@ -37,6 +40,46 @@ const DEFAULT_IDLE_TIMEOUT_MS: u64 = 1_800_000;
 
 /// Startup timeout — container must produce first output within this window.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum UDS frame size (4 MiB). Must match container-side MAX_FRAME_SIZE.
+const MAX_UDS_FRAME_SIZE: usize = 4 * 1024 * 1024;
+
+/// Reads length-prefixed frames from a Unix domain socket connection.
+/// Frame format: 4-byte big-endian length + UTF-8 JSON payload.
+struct UdsFrameReader {
+    stream: tokio::net::UnixStream,
+}
+
+impl UdsFrameReader {
+    fn new(stream: tokio::net::UnixStream) -> Self {
+        Self { stream }
+    }
+
+    /// Read one frame. Returns None on clean EOF, Err on protocol violation.
+    async fn read_frame(&mut self) -> std::io::Result<Option<String>> {
+        let mut len_buf = [0u8; 4];
+        match self.stream.read_exact(&mut len_buf).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(e),
+        }
+
+        let len = u32::from_be_bytes(len_buf) as usize;
+        if len > MAX_UDS_FRAME_SIZE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("UDS frame too large: {} bytes (max {})", len, MAX_UDS_FRAME_SIZE),
+            ));
+        }
+
+        let mut payload = vec![0u8; len];
+        self.stream.read_exact(&mut payload).await?;
+
+        String::from_utf8(payload).map(Some).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+        })
+    }
+}
 
 /// Configuration for running a container agent.
 #[derive(Clone)]
@@ -112,12 +155,34 @@ pub async fn run_container_agent(
     let image = container_image(runtime);
     let container_args = build_container_args(&mounts, &name, image, &config.timezone);
 
+    // Bind UDS listener for container output before spawning.
+    // Socket path: {data_dir}/ipc/{group}/output.sock → /workspace/ipc/output.sock inside container.
+    let ipc_dir = config.data_dir.join("ipc").join(&group.folder);
+    let uds_socket_path = ipc_dir.join("output.sock");
+    // Remove stale socket from previous runs
+    tokio::fs::remove_file(&uds_socket_path).await.ok();
+    let uds_listener = match UnixListener::bind(&uds_socket_path) {
+        Ok(listener) => {
+            debug!(path = %uds_socket_path.display(), "UDS output listener bound");
+            Some(listener)
+        }
+        Err(e) => {
+            warn!(
+                path = %uds_socket_path.display(),
+                error = %e,
+                "Failed to bind UDS listener, using stdout-only"
+            );
+            None
+        }
+    };
+
     info!(
         group = %group.name,
         container_name = %name,
         mount_count = mounts.len(),
         is_main,
         runtime = runtime.as_str(),
+        uds_enabled = uds_listener.is_some(),
         "Spawning container agent"
     );
 
@@ -221,7 +286,7 @@ pub async fn run_container_agent(
         }
     });
 
-    // Stream stdout for OUTPUT markers
+    // Stream stdout/stderr and optionally UDS output
     let stdout = child.stdout.take().unwrap();
     let mut stdout_reader = BufReader::new(stdout);
     let mut stdout_buf = String::new();
@@ -234,7 +299,11 @@ pub async fn run_container_agent(
     let mut stderr_total = String::new();
     let mut stderr_truncated = false;
 
-    // Process stdout and stderr concurrently
+    // UDS state: None until container connects, then Some(reader)
+    let mut uds_reader: Option<UdsFrameReader> = None;
+    let mut uds_active = false; // true once UDS connection accepted
+
+    // Process stdout, stderr, and UDS concurrently
     let on_output_ref = on_output.clone();
     let had_output_ref = had_streaming_output.clone();
     let session_ref = new_session_id.clone();
@@ -242,11 +311,73 @@ pub async fn run_container_agent(
 
     loop {
         tokio::select! {
+            // UDS accept: wait for container to connect (only when no connection yet)
+            result = async {
+                match uds_listener.as_ref() {
+                    Some(listener) => listener.accept().await,
+                    None => std::future::pending().await,
+                }
+            }, if !uds_active => {
+                match result {
+                    Ok((stream, _)) => {
+                        info!(group = %group.name, "UDS connection accepted");
+                        uds_reader = Some(UdsFrameReader::new(stream));
+                        uds_active = true;
+                    }
+                    Err(e) => {
+                        warn!(group = %group.name, error = %e, "UDS accept error");
+                    }
+                }
+            }
+
+            // UDS frame read: read length-prefixed frames from connected socket
+            result = async {
+                match uds_reader.as_mut() {
+                    Some(reader) => reader.read_frame().await,
+                    None => std::future::pending().await,
+                }
+            }, if uds_active => {
+                match result {
+                    Ok(Some(json_str)) => {
+                        match serde_json::from_str::<ContainerOutput>(&json_str) {
+                            Ok(parsed) => {
+                                if let Some(ref sid) = parsed.new_session_id {
+                                    *session_ref.lock().await = Some(sid.clone());
+                                }
+                                *had_output_ref.lock().await = true;
+                                activity_tx_ref.send(Instant::now()).ok();
+
+                                if let Some(ref cb) = on_output_ref {
+                                    cb(parsed).await;
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    group = %group.name,
+                                    error = %e,
+                                    "Failed to parse UDS output frame"
+                                );
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        debug!(group = %group.name, "UDS connection closed by container");
+                        uds_reader = None;
+                        uds_active = false;
+                    }
+                    Err(e) => {
+                        warn!(group = %group.name, error = %e, "UDS read error");
+                        uds_reader = None;
+                        uds_active = false;
+                    }
+                }
+            }
+
             result = stdout_reader.read_line(&mut stdout_buf) => {
                 match result {
                     Ok(0) => break, // EOF
                     Ok(n) => {
-                        // Accumulate only the NEW bytes for logging (read_line appends)
+                        // Accumulate for logging
                         if !stdout_truncated {
                             let new_bytes = &stdout_buf[stdout_buf.len() - n..];
                             let remaining = MAX_OUTPUT_SIZE - stdout_total.len();
@@ -259,8 +390,8 @@ pub async fn run_container_agent(
                             }
                         }
 
-                        // Parse OUTPUT markers
-                        if on_output_ref.is_some() {
+                        // Parse OUTPUT markers only when UDS is NOT active (fallback mode)
+                        if !uds_active && on_output_ref.is_some() {
                             let (results, consumed) = extract_output_markers(&stdout_buf);
                             if consumed > 0 {
                                 stdout_buf = stdout_buf[consumed..].to_string();
@@ -272,7 +403,6 @@ pub async fn run_container_agent(
                                             *session_ref.lock().await = Some(sid.clone());
                                         }
                                         *had_output_ref.lock().await = true;
-                                        // Reset activity timer
                                         activity_tx_ref.send(Instant::now()).ok();
 
                                         if let Some(ref cb) = on_output_ref {
@@ -327,6 +457,9 @@ pub async fn run_container_agent(
         }
     }
 
+    // Clean up UDS socket
+    tokio::fs::remove_file(&uds_socket_path).await.ok();
+
     // Wait for process exit
     let status = child.wait().await?;
     let duration = start.elapsed();
@@ -338,6 +471,15 @@ pub async fn run_container_agent(
     let had_output = *had_streaming_output.lock().await;
     let session_id = new_session_id.lock().await.clone();
     let exit_code = status.code();
+
+    // Read and remove IPC sent_messages.log (messages the agent sent during this run)
+    let sent_messages_log = ipc_dir.join("sent_messages.log");
+    let sent_messages = tokio::fs::read_to_string(&sent_messages_log)
+        .await
+        .unwrap_or_default();
+    if !sent_messages.is_empty() {
+        tokio::fs::remove_file(&sent_messages_log).await.ok();
+    }
 
     // Write container log
     write_container_log(
@@ -353,6 +495,7 @@ pub async fn run_container_agent(
         stdout_truncated,
         &stderr_total,
         stderr_truncated,
+        &sent_messages,
     )
     .await;
 
@@ -544,6 +687,7 @@ async fn write_container_log(
     stdout_truncated: bool,
     stderr: &str,
     stderr_truncated: bool,
+    sent_messages: &str,
 ) {
     let timestamp = chrono_timestamp();
     let log_file = logs_dir.join(format!("container-{}.log", timestamp));
@@ -594,6 +738,13 @@ async fn write_container_log(
                 if m.readonly { " (ro)" } else { "" }
             ));
         }
+    }
+
+    // Include messages sent via IPC during this container run
+    if !sent_messages.is_empty() {
+        lines.push(String::new());
+        lines.push("=== Sent Messages ===".to_string());
+        lines.push(sent_messages.trim_end().to_string());
     }
 
     let content = lines.join("\n");

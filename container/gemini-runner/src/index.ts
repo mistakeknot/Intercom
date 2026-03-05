@@ -22,6 +22,8 @@ import {
   writeOutput,
   readStdin,
   log,
+  initUdsOutput,
+  closeUdsOutput,
 } from '../../shared/protocol.js';
 import type { IpcContext } from '../../shared/ipc-tools.js';
 import {
@@ -397,6 +399,9 @@ async function main(): Promise<void> {
   fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
   try { fs.unlinkSync('/workspace/ipc/input/_close'); } catch { /* ignore */ }
 
+  // Connect to UDS output socket if available (falls back to stdout markers)
+  await initUdsOutput();
+
   // Build initial prompt
   let prompt = containerInput.prompt;
   if (containerInput.isScheduledTask) {
@@ -465,6 +470,7 @@ async function main(): Promise<void> {
       newSessionId: sessionId,
       error: errorMessage,
     });
+    closeUdsOutput();
     process.exit(1);
   }
 
@@ -485,6 +491,8 @@ async function main(): Promise<void> {
   } catch (err) {
     log(`Failed to archive: ${err instanceof Error ? err.message : String(err)}`);
   }
+
+  closeUdsOutput();
 }
 
 main();
