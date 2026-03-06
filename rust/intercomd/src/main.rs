@@ -10,6 +10,7 @@ mod queue;
 mod scheduler;
 mod scheduler_wiring;
 mod telegram;
+mod telegram_poller;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -300,20 +301,31 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         agent_timestamps,
     };
 
+    // Determine IPC delegate mode: Telegram-direct (no Node) or HTTP (Node host)
+    let telegram_only = state.telegram.is_enabled()
+        && std::env::var("TELEGRAM_BOT_TOKEN")
+            .ok()
+            .filter(|t| !t.trim().is_empty())
+            .is_some();
+
     // IPC watcher — polls data/ipc/ directories for container messages/queries
     let ipc_config = ipc::IpcWatcherConfig {
         ipc_base_dir: project_root.join("data/ipc"),
         ..Default::default()
     };
-    let delegate: Arc<dyn ipc::IpcDelegate> =
-        Arc::new(ipc::HttpDelegate::new(&host_callback_url));
+    let delegate: Arc<dyn ipc::IpcDelegate> = if telegram_only {
+        info!("IPC delegate: sending via TelegramBridge directly (no Node host)");
+        Arc::new(ipc::TelegramDelegate::new(state.telegram.clone()))
+    } else {
+        info!(
+            host_callback_url = %host_callback_url,
+            "IPC delegate: forwarding messages/tasks to Node host"
+        );
+        Arc::new(ipc::HttpDelegate::new(&host_callback_url))
+    };
     let registry = ipc::GroupRegistry::with_fallback(state.groups.clone());
-    info!(
-        host_callback_url = %host_callback_url,
-        "IPC delegate: forwarding messages/tasks to Node host"
-    );
     let ipc_watcher =
-        ipc::IpcWatcher::with_registry(ipc_config, demarch, delegate, registry.clone());
+        ipc::IpcWatcher::with_registry(ipc_config, demarch, delegate.clone(), registry.clone());
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     let ipc_shutdown_rx = shutdown_rx.clone();
@@ -321,12 +333,17 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         ipc_watcher.run(ipc_shutdown_rx).await;
     });
 
-    // Group registry sync — fetches registered groups from Node host periodically
-    let registry_shutdown_rx = shutdown_rx.clone();
-    let registry_url = host_callback_url.clone();
-    let registry_handle = tokio::spawn(async move {
-        ipc::sync_registry_loop(registry, registry_url, registry_shutdown_rx).await;
-    });
+    // Group registry sync — only needed when Node host is running
+    let registry_handle = if !telegram_only {
+        let registry_shutdown_rx = shutdown_rx.clone();
+        let registry_url = host_callback_url.clone();
+        Some(tokio::spawn(async move {
+            ipc::sync_registry_loop(registry, registry_url, registry_shutdown_rx).await;
+        }))
+    } else {
+        info!("Group registry sync disabled (Telegram-only mode, groups from Postgres)");
+        None
+    };
 
     // Event consumer — polls ic events tail and sends push notifications
     let events_config = events::EventConsumerConfig {
@@ -339,8 +356,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         stale_phase_threshold_secs: state.config.events.stale_phase_threshold_secs,
     };
     let events_demarch = state.demarch.clone();
-    let events_delegate: Arc<dyn ipc::IpcDelegate> =
-        Arc::new(ipc::HttpDelegate::new(&host_callback_url));
+    let events_delegate = delegate;
     let events_shutdown_rx = shutdown_rx.clone();
     let events_handle = tokio::spawn(async move {
         let mut consumer =
@@ -496,6 +512,45 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         }
     }
 
+    // Telegram update poller — replaces Node/grammY for inbound messages
+    let mut telegram_poller_handle: Option<tokio::task::JoinHandle<()>> = None;
+    if state.telegram.is_enabled() {
+        if let Some(ref pool) = state.db {
+            let bot_token = std::env::var("TELEGRAM_BOT_TOKEN")
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if !bot_token.is_empty() {
+                let poller_config = telegram_poller::TelegramPollerConfig {
+                    poll_timeout_secs: 30,
+                    groups_dir: project_root.join("groups"),
+                    assistant_name: std::env::var("ASSISTANT_NAME")
+                        .unwrap_or_else(|_| "Amtiskaw".into()),
+                    main_group_folder: state.config.orchestrator.main_group_folder.clone(),
+                    started_at: state.started_at,
+                };
+                let poller = telegram_poller::TelegramPoller::new(
+                    poller_config,
+                    bot_token,
+                    state.telegram.clone(),
+                    state.demarch.clone(),
+                    state.config.clone(),
+                    pool.clone(),
+                    state.queue.clone(),
+                    state.groups.clone(),
+                    state.sessions.clone(),
+                );
+                let poller_shutdown = shutdown_rx.clone();
+                telegram_poller_handle = Some(tokio::spawn(async move {
+                    poller.run(poller_shutdown).await;
+                }));
+                info!("Telegram poller enabled — receiving updates directly in Rust");
+            }
+        } else {
+            warn!("Telegram bridge enabled but no Postgres — poller disabled");
+        }
+    }
+
     // DB routes use Option<PgPool> state — nested router avoids exposing
     // full AppState to the db module.
     let db_routes = Router::new()
@@ -554,7 +609,9 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     // Signal background tasks to stop on server exit
     let _ = shutdown_tx.send(true);
     let _ = ipc_handle.await;
-    let _ = registry_handle.await;
+    if let Some(h) = registry_handle {
+        let _ = h.await;
+    }
     let _ = events_handle.await;
     if let Some(h) = message_loop_handle {
         let _ = h.await;
@@ -569,6 +626,9 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         let _ = h.await;
     }
     if let Some(h) = scheduler_handle {
+        let _ = h.await;
+    }
+    if let Some(h) = telegram_poller_handle {
         let _ = h.await;
     }
 
@@ -782,9 +842,7 @@ async fn telegram_callback(
 
 /// Fetch Intercore run info for /status enrichment.
 /// Degrades gracefully: returns None on any error.
-async fn fetch_run_info(state: &AppState) -> Option<commands::RunInfo> {
-    let demarch = &state.demarch;
-
+pub async fn fetch_run_info(demarch: &DemarchAdapter) -> Option<commands::RunInfo> {
     // 1. Get current run (lightweight: { found, id, goal, phase })
     let current_resp = demarch.execute_read(ReadOperation::RunStatus { run_id: None });
     if current_resp.status != intercom_core::DemarchStatus::Ok {
@@ -885,7 +943,7 @@ async fn handle_slash_command(
     };
     // Fetch Intercore run info for /status enrichment
     let run_info = if request.command == "status" {
-        fetch_run_info(&state).await
+        fetch_run_info(&state.demarch).await
     } else {
         None
     };

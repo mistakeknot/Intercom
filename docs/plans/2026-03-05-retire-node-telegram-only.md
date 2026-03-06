@@ -1,6 +1,6 @@
 # Retire Node Host — Telegram-Only Mode
 
-**Bead:** (create after approval)
+**Bead:** iv-bpc5r
 **Goal:** Move Telegram update polling into intercomd (Rust), eliminating the Node host process entirely. Single-binary deployment.
 
 ## Current Flow (Node + Rust)
@@ -40,25 +40,24 @@ Telegram API → Rust update poller → Postgres directly → message_loop → c
 ## Implementation Plan
 
 ### Phase 1: Telegram Update Poller in Rust
-- [ ] Add `telegram_poller` module to intercomd
-- [ ] Implement `getUpdates` long-polling loop with offset tracking
-- [ ] Parse `Update` types: `message` (text, photo, document, sticker, etc), `callback_query`
-- [ ] Store offset in memory (reset on restart is fine — Telegram replays missed updates)
-- [ ] Wire to existing `route_ingress` for message acceptance/rejection
-- [ ] For accepted messages: write directly to Postgres `messages` table + enqueue in GroupQueue
-- [ ] For commands: call `commands::handle_command` + apply effects + send response via TelegramBridge
-- [ ] For callbacks: call `handle_callback` (already wired)
-- [ ] Download media files (photos, documents) to `groups/<folder>/media/`
-- [ ] Translate `@bot_username` mentions to trigger pattern
-- [ ] Call `setMyCommands` at startup
-- [ ] Add config: `telegram.polling_timeout_secs` (default: 30)
+- [x] Add `telegram_poller` module to intercomd
+- [x] Implement `getUpdates` long-polling loop with offset tracking
+- [x] Parse `Update` types: `message` (text, photo, document, sticker, etc), `callback_query`
+- [x] Store offset in memory (reset on restart is fine — Telegram replays missed updates)
+- [x] Wire to existing trigger matching for message acceptance/rejection
+- [x] For accepted messages: write directly to Postgres `messages` table + enqueue in GroupQueue
+- [x] For commands: call `commands::handle_command` + apply effects + send response via TelegramBridge
+- [x] For callbacks: call `handle_callback` (already wired)
+- [x] Download media files (photos, documents) to `groups/<folder>/media/`
+- [x] Translate `@bot_username` mentions to trigger pattern
+- [x] Call `setMyCommands` at startup
+- [x] Configurable polling timeout (default: 30s)
 
 ### Phase 2: Remove Node Dependencies
-- [ ] Remove host callback server references from intercomd config
-- [ ] Remove `HttpDelegate` IPC delegate — replace with direct Postgres/TelegramBridge calls
-- [ ] Remove `sync_registry_loop` (fetched groups from Node) — Rust already has groups in memory
-- [ ] Remove events `HttpDelegate` — use direct TelegramBridge for notifications
-- [ ] Update IPC watcher to send messages via TelegramBridge directly (not HTTP delegate)
+- [x] Add `TelegramDelegate` IPC delegate — sends via TelegramBridge directly
+- [x] Auto-detect Telegram-only mode: skip `sync_registry_loop` when no Node host
+- [x] Events consumer uses shared delegate (TelegramDelegate in Telegram-only mode)
+- [x] IPC watcher uses `TelegramDelegate` for message sends (not HTTP to Node)
 
 ### Phase 3: Clean Up Node
 - [ ] Stop `intercom.service` (systemd)

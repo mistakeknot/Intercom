@@ -180,6 +180,61 @@ impl IpcDelegate for HttpDelegate {
     }
 }
 
+/// Direct Telegram delegate that sends messages via TelegramBridge.
+/// Used in Telegram-only mode when no Node host is running.
+pub struct TelegramDelegate {
+    telegram: Arc<crate::telegram::TelegramBridge>,
+}
+
+impl TelegramDelegate {
+    pub fn new(telegram: Arc<crate::telegram::TelegramBridge>) -> Self {
+        Self { telegram }
+    }
+}
+
+impl IpcDelegate for TelegramDelegate {
+    fn send_message(&self, chat_jid: &str, text: &str, _sender: Option<&str>) {
+        let telegram = self.telegram.clone();
+        let jid = chat_jid.to_string();
+        let text = text.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = telegram.send_text_to_jid(&jid, &text).await {
+                warn!(jid = %jid, err = %e, "TelegramDelegate: send failed");
+            }
+        });
+    }
+
+    fn send_message_with_buttons(
+        &self,
+        chat_jid: &str,
+        text: &str,
+        _sender: Option<&str>,
+        reply_markup: Option<crate::telegram::InlineKeyboardMarkup>,
+    ) {
+        let telegram = self.telegram.clone();
+        let request = crate::telegram::TelegramSendWithButtonsRequest {
+            jid: chat_jid.to_string(),
+            text: text.to_string(),
+            reply_markup,
+        };
+        tokio::spawn(async move {
+            if let Err(e) = telegram.send_message_with_buttons(request).await {
+                warn!(err = %e, "TelegramDelegate: send with buttons failed");
+            }
+        });
+    }
+
+    fn forward_task(&self, task: &IpcTask, group_folder: &str, _is_main: bool) {
+        // In Telegram-only mode, task IPC is handled by Rust's scheduler directly.
+        // Log and skip — the scheduler picks up tasks from Postgres.
+        info!(
+            task = ?task,
+            group_folder,
+            "IPC task received (handled by Rust scheduler)"
+        );
+    }
+}
+
 /// The IPC watcher. Owns polling state and dispatches to DemarchAdapter + delegate.
 pub struct IpcWatcher {
     config: IpcWatcherConfig,
