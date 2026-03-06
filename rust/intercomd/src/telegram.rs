@@ -1,9 +1,6 @@
-use std::path::PathBuf;
-
 use anyhow::{Context, anyhow};
 use intercom_core::IntercomConfig;
 use reqwest::Client;
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -14,42 +11,6 @@ const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 pub struct TelegramBridge {
     client: Client,
     bot_token: Option<String>,
-    sqlite_path: PathBuf,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct TelegramIngressRequest {
-    pub chat_jid: String,
-    pub chat_name: Option<String>,
-    pub chat_type: Option<String>,
-    pub message_id: String,
-    pub sender_id: Option<String>,
-    pub sender_name: Option<String>,
-    pub content: String,
-    pub timestamp: String,
-    #[serde(default)]
-    pub persist: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct TelegramIngressResponse {
-    pub accepted: bool,
-    pub reason: Option<String>,
-    pub normalized_content: String,
-    pub group_name: Option<String>,
-    pub group_folder: Option<String>,
-    pub runtime: Option<String>,
-    pub model: Option<String>,
-    pub parity: TelegramIngressParity,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct TelegramIngressParity {
-    pub trigger_required: bool,
-    pub trigger_present: bool,
-    pub runtime_profile_found: bool,
-    pub runtime_fallback_used: bool,
-    pub model_fallback_used: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -112,26 +73,6 @@ pub struct TelegramSendWithButtonsRequest {
     pub reply_markup: Option<InlineKeyboardMarkup>,
 }
 
-/// Incoming callback query from Telegram (button press).
-#[derive(Debug, Clone, Deserialize)]
-pub struct TelegramCallbackRequest {
-    pub callback_query_id: String,
-    pub chat_jid: String,
-    pub message_id: String,
-    pub sender_id: Option<String>,
-    pub sender_name: Option<String>,
-    pub data: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct TelegramCallbackResponse {
-    pub ok: bool,
-    pub action: String,
-    pub target_id: String,
-    pub result: Option<String>,
-    pub error: Option<String>,
-}
-
 #[derive(Debug, Deserialize)]
 struct TelegramApiEnvelope {
     ok: bool,
@@ -139,27 +80,8 @@ struct TelegramApiEnvelope {
     description: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-struct RegisteredGroupRow {
-    name: String,
-    folder: String,
-    trigger_pattern: String,
-    requires_trigger: bool,
-    runtime: Option<String>,
-    model: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct RuntimeResolution {
-    runtime: String,
-    model: String,
-    runtime_profile_found: bool,
-    runtime_fallback_used: bool,
-    model_fallback_used: bool,
-}
-
 impl TelegramBridge {
-    pub fn new(config: &IntercomConfig) -> Self {
+    pub fn new(_config: &IntercomConfig) -> Self {
         let bot_token = std::env::var("TELEGRAM_BOT_TOKEN")
             .ok()
             .map(|value| value.trim().to_string())
@@ -168,7 +90,6 @@ impl TelegramBridge {
         Self {
             client: Client::new(),
             bot_token,
-            sqlite_path: PathBuf::from(&config.storage.sqlite_legacy_path),
         }
     }
 
@@ -204,72 +125,6 @@ impl TelegramBridge {
         })
         .await?;
         Ok(())
-    }
-
-    pub fn route_ingress(
-        &self,
-        config: &IntercomConfig,
-        request: TelegramIngressRequest,
-    ) -> anyhow::Result<TelegramIngressResponse> {
-        let conn = self.open_sqlite()?;
-        let group = load_registered_group(&conn, &request.chat_jid)?;
-
-        if request.persist {
-            ensure_telegram_persistence_schema(&conn)?;
-            persist_chat_metadata(&conn, &request)?;
-        }
-
-        let Some(group) = group else {
-            return Ok(TelegramIngressResponse {
-                accepted: false,
-                reason: Some("unregistered_group".to_string()),
-                normalized_content: request.content,
-                group_name: None,
-                group_folder: None,
-                runtime: None,
-                model: None,
-                parity: TelegramIngressParity {
-                    trigger_required: false,
-                    trigger_present: false,
-                    runtime_profile_found: false,
-                    runtime_fallback_used: false,
-                    model_fallback_used: false,
-                },
-            });
-        };
-
-        let trigger_required = group.folder != "main" && group.requires_trigger;
-        let trigger_present =
-            !trigger_required || trigger_matches(&request.content, &group.trigger_pattern);
-        let runtime = resolve_runtime(config, &group);
-
-        if request.persist {
-            persist_inbound_message(&conn, &request)?;
-        }
-
-        let accepted = !trigger_required || trigger_present;
-        let reason = if accepted {
-            None
-        } else {
-            Some("trigger_required".to_string())
-        };
-
-        Ok(TelegramIngressResponse {
-            accepted,
-            reason,
-            normalized_content: request.content,
-            group_name: Some(group.name),
-            group_folder: Some(group.folder),
-            runtime: Some(runtime.runtime),
-            model: Some(runtime.model),
-            parity: TelegramIngressParity {
-                trigger_required,
-                trigger_present,
-                runtime_profile_found: runtime.runtime_profile_found,
-                runtime_fallback_used: runtime.runtime_fallback_used,
-                model_fallback_used: runtime.model_fallback_used,
-            },
-        })
     }
 
     pub async fn send_message(
@@ -491,179 +346,6 @@ impl TelegramBridge {
         Ok(())
     }
 
-    /// Handle a callback query from an inline keyboard button press.
-    /// Parses the callback data, routes to the appropriate Demarch write operation,
-    /// edits the original message with the result, and answers the callback.
-    ///
-    /// Authorization: the callback's chat must be a registered group, and
-    /// `is_main` is derived from the group's folder (not hardcoded). This
-    /// ensures non-main groups cannot execute write operations via callbacks.
-    pub async fn handle_callback(
-        &self,
-        request: TelegramCallbackRequest,
-        demarch: &intercom_core::DemarchAdapter,
-        config: &intercom_core::IntercomConfig,
-    ) -> anyhow::Result<TelegramCallbackResponse> {
-        // --- Authorization: verify chat is registered and derive is_main ---
-        let conn = self.open_sqlite()?;
-        let group = load_registered_group(&conn, &request.chat_jid)?;
-        let Some(group) = group else {
-            self.answer_callback_query(
-                &request.callback_query_id,
-                Some("Unauthorized: unregistered chat"),
-            )
-            .await?;
-            return Ok(TelegramCallbackResponse {
-                ok: false,
-                action: request.data.clone(),
-                target_id: String::new(),
-                result: None,
-                error: Some("Callback from unregistered chat".to_string()),
-            });
-        };
-        let is_main = group.folder == config.orchestrator.main_group_folder;
-
-        let parts: Vec<&str> = request.data.splitn(2, ':').collect();
-        if parts.len() != 2 {
-            self.answer_callback_query(&request.callback_query_id, Some("Invalid action"))
-                .await?;
-            return Ok(TelegramCallbackResponse {
-                ok: false,
-                action: request.data.clone(),
-                target_id: String::new(),
-                result: None,
-                error: Some("Invalid callback data format".to_string()),
-            });
-        }
-
-        let action = parts[0];
-        let target_id = parts[1].to_string();
-        let sender = request.sender_name.as_deref().unwrap_or("unknown");
-
-        let (write_result, status_text) = match action {
-            "approve" => {
-                let resp = demarch.execute_write(
-                    intercom_core::WriteOperation::ApproveGate {
-                        gate_id: Some(target_id.clone()),
-                        reason: Some(format!("Approved by {sender} via Telegram")),
-                    },
-                    is_main,
-                );
-                let ok = resp.status == intercom_core::DemarchStatus::Ok;
-                let status = if ok {
-                    format!("✅ Gate {target_id} approved by @{sender}")
-                } else {
-                    format!("❌ Failed: {}", resp.result)
-                };
-                (resp.result, status)
-            }
-            "reject" => {
-                let resp = demarch.execute_write(
-                    intercom_core::WriteOperation::RejectGate {
-                        gate_id: Some(target_id.clone()),
-                        reason: Some(format!("Rejected by {sender} via Telegram")),
-                    },
-                    is_main,
-                );
-                let ok = resp.status == intercom_core::DemarchStatus::Ok;
-                let status = if ok {
-                    format!("❌ Gate {target_id} rejected by @{sender}")
-                } else {
-                    format!("❌ Failed: {}", resp.result)
-                };
-                (resp.result, status)
-            }
-            "defer" => {
-                let resp = demarch.execute_write(
-                    intercom_core::WriteOperation::DeferGate {
-                        gate_id: Some(target_id.clone()),
-                        reason: Some(format!("Deferred by {sender} via Telegram")),
-                    },
-                    is_main,
-                );
-                let ok = resp.status == intercom_core::DemarchStatus::Ok;
-                let status = if ok {
-                    format!("⏸️ Gate {target_id} deferred by @{sender}")
-                } else {
-                    format!("❌ Failed: {}", resp.result)
-                };
-                (resp.result, status)
-            }
-            "extend" => {
-                let resp = demarch.execute_write(
-                    intercom_core::WriteOperation::ExtendBudget {
-                        run_id: target_id.clone(),
-                        max_dispatches: None,
-                    },
-                    is_main,
-                );
-                let ok = resp.status == intercom_core::DemarchStatus::Ok;
-                let status = if ok {
-                    format!("💰 Budget extended for run {target_id} by @{sender}")
-                } else {
-                    format!("❌ Failed: {}", resp.result)
-                };
-                (resp.result, status)
-            }
-            "cancel" => {
-                let resp = demarch.execute_write(
-                    intercom_core::WriteOperation::CancelRun {
-                        run_id: target_id.clone(),
-                        reason: Some(format!("Cancelled by {sender} via Telegram")),
-                    },
-                    is_main,
-                );
-                let ok = resp.status == intercom_core::DemarchStatus::Ok;
-                let status = if ok {
-                    format!("🛑 Run {target_id} cancelled by @{sender}")
-                } else {
-                    format!("❌ Failed: {}", resp.result)
-                };
-                (resp.result, status)
-            }
-            _ => {
-                self.answer_callback_query(&request.callback_query_id, Some("Unknown action"))
-                    .await?;
-                return Ok(TelegramCallbackResponse {
-                    ok: false,
-                    action: action.to_string(),
-                    target_id,
-                    result: None,
-                    error: Some(format!("Unknown callback action: {action}")),
-                });
-            }
-        };
-
-        // Edit the original message to show result (removes buttons)
-        let _ = self
-            .edit_message(TelegramEditRequest {
-                jid: request.chat_jid.clone(),
-                message_id: request.message_id.clone(),
-                text: status_text.clone(),
-            })
-            .await;
-
-        // Answer the callback query (dismisses loading spinner)
-        self.answer_callback_query(&request.callback_query_id, Some(&status_text))
-            .await?;
-
-        Ok(TelegramCallbackResponse {
-            ok: true,
-            action: action.to_string(),
-            target_id,
-            result: Some(write_result),
-            error: None,
-        })
-    }
-
-    fn open_sqlite(&self) -> anyhow::Result<Connection> {
-        Connection::open(&self.sqlite_path).with_context(|| {
-            format!(
-                "failed to open sqlite database for Telegram routing: {}",
-                self.sqlite_path.display()
-            )
-        })
-    }
 }
 
 impl TelegramSendResponse {
@@ -736,221 +418,9 @@ fn truncate_for_telegram(text: &str, max_chars: usize) -> (String, bool) {
     (output, false)
 }
 
-fn trigger_matches(content: &str, trigger_pattern: &str) -> bool {
-    let trigger = trigger_pattern.trim();
-    if trigger.is_empty() {
-        return true;
-    }
-
-    let content = content.trim_start();
-    if content.len() < trigger.len() {
-        return false;
-    }
-
-    content
-        .get(..trigger.len())
-        .map(|prefix| prefix.eq_ignore_ascii_case(trigger))
-        .unwrap_or(false)
-}
-
-fn resolve_runtime(config: &IntercomConfig, group: &RegisteredGroupRow) -> RuntimeResolution {
-    let requested_runtime = group
-        .runtime
-        .as_deref()
-        .unwrap_or(&config.runtimes.default_runtime);
-
-    let mut runtime = requested_runtime.to_string();
-    let mut profile = config.runtimes.profiles.get(requested_runtime);
-    let mut runtime_profile_found = profile.is_some();
-    let mut runtime_fallback_used = false;
-
-    if profile.is_none() {
-        if let Some(default_profile) = config
-            .runtimes
-            .profiles
-            .get(&config.runtimes.default_runtime)
-        {
-            profile = Some(default_profile);
-            runtime = config.runtimes.default_runtime.clone();
-            runtime_fallback_used = true;
-        } else if let Some((name, first_profile)) = config.runtimes.profiles.iter().next() {
-            profile = Some(first_profile);
-            runtime = name.clone();
-            runtime_fallback_used = true;
-        } else {
-            runtime_profile_found = false;
-        }
-    }
-
-    let model = if let Some(model) = &group.model {
-        model.clone()
-    } else if let Some(profile) = profile {
-        profile.default_model.clone()
-    } else {
-        "unknown".to_string()
-    };
-
-    RuntimeResolution {
-        runtime,
-        model,
-        runtime_profile_found,
-        runtime_fallback_used,
-        model_fallback_used: group.model.is_none(),
-    }
-}
-
-fn load_registered_group(
-    conn: &Connection,
-    chat_jid: &str,
-) -> anyhow::Result<Option<RegisteredGroupRow>> {
-    if !sqlite_has_table(conn, "registered_groups")? {
-        return Ok(None);
-    }
-
-    let has_requires_trigger = sqlite_has_column(conn, "registered_groups", "requires_trigger")?;
-    let has_runtime = sqlite_has_column(conn, "registered_groups", "runtime")?;
-    let has_model = sqlite_has_column(conn, "registered_groups", "model")?;
-
-    let requires_expr = if has_requires_trigger {
-        "COALESCE(requires_trigger, 1)"
-    } else {
-        "1 AS requires_trigger"
-    };
-    let runtime_expr = if has_runtime {
-        "runtime"
-    } else {
-        "NULL AS runtime"
-    };
-    let model_expr = if has_model { "model" } else { "NULL AS model" };
-
-    let query = format!(
-        "SELECT name, folder, trigger_pattern, {requires_expr}, {runtime_expr}, {model_expr}
-         FROM registered_groups
-         WHERE jid = ?1
-         LIMIT 1"
-    );
-
-    conn.query_row(&query, params![chat_jid], |row| {
-        let requires_trigger: i64 = row.get(3)?;
-        Ok(RegisteredGroupRow {
-            name: row.get(0)?,
-            folder: row.get(1)?,
-            trigger_pattern: row.get(2)?,
-            requires_trigger: requires_trigger != 0,
-            runtime: row.get(4)?,
-            model: row.get(5)?,
-        })
-    })
-    .optional()
-    .context("failed to query registered_groups")
-}
-
-fn ensure_telegram_persistence_schema(conn: &Connection) -> anyhow::Result<()> {
-    conn.execute_batch(
-        "\
-        CREATE TABLE IF NOT EXISTS chats (
-          jid TEXT PRIMARY KEY,
-          name TEXT,
-          last_message_time TEXT,
-          channel TEXT,
-          is_group INTEGER DEFAULT 0
-        );
-
-        CREATE TABLE IF NOT EXISTS messages (
-          id TEXT,
-          chat_jid TEXT,
-          sender TEXT,
-          sender_name TEXT,
-          content TEXT,
-          timestamp TEXT,
-          is_from_me INTEGER,
-          is_bot_message INTEGER DEFAULT 0,
-          PRIMARY KEY (id, chat_jid)
-        );
-        ",
-    )
-    .context("failed to ensure Telegram sqlite persistence schema")
-}
-
-fn persist_chat_metadata(
-    conn: &Connection,
-    request: &TelegramIngressRequest,
-) -> anyhow::Result<()> {
-    let name = request.chat_name.as_deref().unwrap_or(&request.chat_jid);
-    let is_group = if matches!(request.chat_type.as_deref(), Some("private")) {
-        0_i64
-    } else {
-        1_i64
-    };
-
-    conn.execute(
-        "\
-        INSERT INTO chats (jid, name, last_message_time, channel, is_group)
-        VALUES (?1, ?2, ?3, 'telegram', ?4)
-        ON CONFLICT(jid) DO UPDATE SET
-          name = COALESCE(excluded.name, chats.name),
-          last_message_time = MAX(chats.last_message_time, excluded.last_message_time),
-          channel = 'telegram',
-          is_group = excluded.is_group
-        ",
-        params![request.chat_jid, name, request.timestamp, is_group],
-    )
-    .context("failed to persist Telegram chat metadata")?;
-
-    Ok(())
-}
-
-fn persist_inbound_message(
-    conn: &Connection,
-    request: &TelegramIngressRequest,
-) -> anyhow::Result<()> {
-    let sender_name = request.sender_name.as_deref().unwrap_or("Unknown");
-    let sender_id = request.sender_id.as_deref().unwrap_or("");
-
-    conn.execute(
-        "\
-        INSERT OR REPLACE INTO messages
-          (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 0)
-        ",
-        params![
-            request.message_id,
-            request.chat_jid,
-            sender_id,
-            sender_name,
-            request.content,
-            request.timestamp
-        ],
-    )
-    .context("failed to persist Telegram inbound message")?;
-
-    Ok(())
-}
-
-fn sqlite_has_table(conn: &Connection, table: &str) -> anyhow::Result<bool> {
-    let mut stmt =
-        conn.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?1 LIMIT 1")?;
-    let exists = stmt.query_row([table], |_| Ok(1_i64)).optional()?.is_some();
-    Ok(exists)
-}
-
-fn sqlite_has_column(conn: &Connection, table: &str, column: &str) -> anyhow::Result<bool> {
-    let pragma = format!("PRAGMA table_info({table})");
-    let mut stmt = conn.prepare(&pragma)?;
-    let mut rows = stmt.query([])?;
-    while let Some(row) = rows.next()? {
-        let name: String = row.get(1)?;
-        if name == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     #[test]
     fn split_for_telegram_keeps_chunks_within_limit() {
@@ -969,66 +439,6 @@ mod tests {
                 .sum::<usize>(),
             text.chars().count()
         );
-    }
-
-    #[test]
-    fn trigger_match_is_case_insensitive() {
-        assert!(trigger_matches("@Amtiskaw please help", "@amtiskaw"));
-        assert!(!trigger_matches("hello", "@amtiskaw"));
-    }
-
-    #[test]
-    fn ingress_requires_trigger_for_non_main_group() {
-        let tmp = TempDir::new().expect("create tempdir");
-        let db_path = tmp.path().join("messages.db");
-        let conn = Connection::open(&db_path).expect("open sqlite");
-        conn.execute_batch(
-            "\
-            CREATE TABLE registered_groups (
-              jid TEXT PRIMARY KEY,
-              name TEXT NOT NULL,
-              folder TEXT NOT NULL,
-              trigger_pattern TEXT NOT NULL,
-              added_at TEXT NOT NULL,
-              container_config TEXT,
-              requires_trigger INTEGER DEFAULT 1,
-              runtime TEXT,
-              model TEXT
-            );
-            INSERT INTO registered_groups
-              (jid, name, folder, trigger_pattern, added_at, requires_trigger, runtime)
-            VALUES
-              ('tg:1', 'Team', 'team', '@Amtiskaw', '2026-01-01T00:00:00Z', 1, 'gemini');
-            ",
-        )
-        .expect("seed groups");
-        drop(conn);
-
-        let mut config = IntercomConfig::default();
-        config.storage.sqlite_legacy_path = db_path.display().to_string();
-        let bridge = TelegramBridge::new(&config);
-
-        let response = bridge
-            .route_ingress(
-                &config,
-                TelegramIngressRequest {
-                    chat_jid: "tg:1".to_string(),
-                    chat_name: Some("Team".to_string()),
-                    chat_type: Some("group".to_string()),
-                    message_id: "123".to_string(),
-                    sender_id: Some("99".to_string()),
-                    sender_name: Some("User".to_string()),
-                    content: "hello".to_string(),
-                    timestamp: "2026-02-25T00:00:00Z".to_string(),
-                    persist: false,
-                },
-            )
-            .expect("route ingress");
-
-        assert!(!response.accepted);
-        assert_eq!(response.reason.as_deref(), Some("trigger_required"));
-        assert_eq!(response.runtime.as_deref(), Some("gemini"));
-        assert_eq!(response.model.as_deref(), Some("gemini-3.1-pro"));
     }
 
     #[test]

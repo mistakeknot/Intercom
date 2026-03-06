@@ -34,8 +34,7 @@ use intercom_core::{
 };
 use serde::{Deserialize, Serialize};
 use telegram::{
-    TelegramBridge, TelegramCallbackRequest, TelegramCallbackResponse, TelegramEditRequest,
-    TelegramEditResponse, TelegramIngressRequest, TelegramIngressResponse, TelegramSendRequest,
+    TelegramBridge, TelegramEditRequest, TelegramEditResponse, TelegramSendRequest,
     TelegramSendResponse,
 };
 use tokio::sync::RwLock;
@@ -593,10 +592,8 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         .route("/v1/runtime/profiles", get(runtime_profiles))
         .route("/v1/demarch/read", post(demarch_read))
         .route("/v1/demarch/write", post(demarch_write))
-        .route("/v1/telegram/ingress", post(telegram_ingress))
         .route("/v1/telegram/send", post(telegram_send))
         .route("/v1/telegram/edit", post(telegram_edit))
-        .route("/v1/telegram/callback", post(telegram_callback))
         .route("/v1/commands", post(handle_slash_command))
         // groups/set on the main router so it can update the in-memory map
         .route("/v1/db/groups/set-sync", post(set_registered_group_sync))
@@ -785,31 +782,6 @@ async fn demarch_write(
     )
 }
 
-async fn telegram_ingress(
-    State(state): State<AppState>,
-    Json(request): Json<TelegramIngressRequest>,
-) -> Json<TelegramIngressResponse> {
-    match state.telegram.route_ingress(&state.config, request) {
-        Ok(response) => Json(response),
-        Err(err) => Json(TelegramIngressResponse {
-            accepted: false,
-            reason: Some(format!("routing_error: {err}")),
-            normalized_content: String::new(),
-            group_name: None,
-            group_folder: None,
-            runtime: None,
-            model: None,
-            parity: telegram::TelegramIngressParity {
-                trigger_required: false,
-                trigger_present: false,
-                runtime_profile_found: false,
-                runtime_fallback_used: false,
-                model_fallback_used: false,
-            },
-        }),
-    }
-}
-
 async fn telegram_send(
     State(state): State<AppState>,
     Json(request): Json<TelegramSendRequest>,
@@ -827,22 +799,6 @@ async fn telegram_edit(
     match state.telegram.edit_message(request).await {
         Ok(response) => Json(response),
         Err(err) => Json(TelegramEditResponse::from_error(err.to_string())),
-    }
-}
-
-async fn telegram_callback(
-    State(state): State<AppState>,
-    Json(request): Json<TelegramCallbackRequest>,
-) -> Json<TelegramCallbackResponse> {
-    match state.telegram.handle_callback(request, &state.demarch, &state.config).await {
-        Ok(response) => Json(response),
-        Err(err) => Json(TelegramCallbackResponse {
-            ok: false,
-            action: String::new(),
-            target_id: String::new(),
-            result: None,
-            error: Some(err.to_string()),
-        }),
     }
 }
 
