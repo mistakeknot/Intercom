@@ -723,33 +723,143 @@ impl TelegramPoller {
             .map(|m| m.message_id.to_string())
             .unwrap_or_default();
 
-        let request = crate::telegram::TelegramCallbackRequest {
-            callback_query_id: cq.id,
-            chat_jid,
-            message_id,
-            sender_id: Some(cq.from.id.to_string()),
-            sender_name: cq.from.first_name.or(cq.from.username),
-            data,
+        // Authorization: verify chat is registered using Postgres groups (not SQLite)
+        let group = {
+            let groups = self.groups.read().await;
+            groups.get(&chat_jid).cloned()
+        };
+        let group = match group {
+            Some(g) => g,
+            None => {
+                self.telegram
+                    .answer_callback_query(&cq.id, Some("Unauthorized: unregistered chat"))
+                    .await?;
+                return Ok(());
+            }
+        };
+        let is_main = group.folder == self.config.main_group_folder;
+
+        // Parse action:target_id
+        let parts: Vec<&str> = data.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            self.telegram
+                .answer_callback_query(&cq.id, Some("Invalid action"))
+                .await?;
+            return Ok(());
+        }
+
+        let action = parts[0];
+        let target_id = parts[1].to_string();
+        let sender = cq.from.first_name.as_deref()
+            .or(cq.from.username.as_deref())
+            .unwrap_or("unknown");
+
+        // Execute the write operation via demarch
+        let (write_result, status_text) = match action {
+            "approve" => {
+                let resp = self.demarch.execute_write(
+                    intercom_core::WriteOperation::ApproveGate {
+                        gate_id: Some(target_id.clone()),
+                        reason: Some(format!("Approved by {sender} via Telegram")),
+                    },
+                    is_main,
+                );
+                let ok = resp.status == intercom_core::DemarchStatus::Ok;
+                let status = if ok {
+                    format!("✅ Gate {target_id} approved by @{sender}")
+                } else {
+                    format!("❌ Failed: {}", resp.result)
+                };
+                (resp.result, status)
+            }
+            "reject" => {
+                let resp = self.demarch.execute_write(
+                    intercom_core::WriteOperation::RejectGate {
+                        gate_id: Some(target_id.clone()),
+                        reason: Some(format!("Rejected by {sender} via Telegram")),
+                    },
+                    is_main,
+                );
+                let ok = resp.status == intercom_core::DemarchStatus::Ok;
+                let status = if ok {
+                    format!("❌ Gate {target_id} rejected by @{sender}")
+                } else {
+                    format!("❌ Failed: {}", resp.result)
+                };
+                (resp.result, status)
+            }
+            "defer" => {
+                let resp = self.demarch.execute_write(
+                    intercom_core::WriteOperation::DeferGate {
+                        gate_id: Some(target_id.clone()),
+                        reason: Some(format!("Deferred by {sender} via Telegram")),
+                    },
+                    is_main,
+                );
+                let ok = resp.status == intercom_core::DemarchStatus::Ok;
+                let status = if ok {
+                    format!("⏸️ Gate {target_id} deferred by @{sender}")
+                } else {
+                    format!("❌ Failed: {}", resp.result)
+                };
+                (resp.result, status)
+            }
+            "extend" => {
+                let resp = self.demarch.execute_write(
+                    intercom_core::WriteOperation::ExtendBudget {
+                        run_id: target_id.clone(),
+                        max_dispatches: None,
+                    },
+                    is_main,
+                );
+                let ok = resp.status == intercom_core::DemarchStatus::Ok;
+                let status = if ok {
+                    format!("💰 Budget extended for run {target_id} by @{sender}")
+                } else {
+                    format!("❌ Failed: {}", resp.result)
+                };
+                (resp.result, status)
+            }
+            "cancel" => {
+                let resp = self.demarch.execute_write(
+                    intercom_core::WriteOperation::CancelRun {
+                        run_id: target_id.clone(),
+                        reason: Some(format!("Cancelled by {sender} via Telegram")),
+                    },
+                    is_main,
+                );
+                let ok = resp.status == intercom_core::DemarchStatus::Ok;
+                let status = if ok {
+                    format!("🛑 Run {target_id} cancelled by @{sender}")
+                } else {
+                    format!("❌ Failed: {}", resp.result)
+                };
+                (resp.result, status)
+            }
+            _ => {
+                self.telegram
+                    .answer_callback_query(&cq.id, Some("Unknown action"))
+                    .await?;
+                return Ok(());
+            }
         };
 
-        match self
+        let _ = write_result;
+
+        // Edit the original message to show result (removes buttons)
+        let _ = self
             .telegram
-            .handle_callback(request, &self.demarch, &self.intercom_config)
-            .await
-        {
-            Ok(resp) => {
-                if !resp.ok {
-                    warn!(
-                        action = %resp.action,
-                        error = resp.error.as_deref().unwrap_or(""),
-                        "callback query failed"
-                    );
-                }
-            }
-            Err(e) => {
-                warn!(err = %e, "callback query error");
-            }
-        }
+            .edit_message(crate::telegram::TelegramEditRequest {
+                jid: chat_jid,
+                message_id,
+                text: status_text.clone(),
+            })
+            .await;
+
+        // Answer the callback query (dismisses loading spinner)
+        self.telegram
+            .answer_callback_query(&cq.id, Some(&status_text))
+            .await?;
 
         Ok(())
     }

@@ -60,17 +60,17 @@ Telegram API → Rust update poller → Postgres directly → message_loop → c
 - [x] IPC watcher uses `TelegramDelegate` for message sends (not HTTP to Node)
 
 ### Phase 3: Clean Up Node
-- [ ] Stop `intercom.service` (systemd)
+- [x] Stop `intercom.service` (systemd)
 - [ ] Remove `intercom.service` unit file
-- [ ] Archive Node source (don't delete — WhatsApp might return)
-- [ ] Update CLAUDE.md, AGENTS.md
+- [x] Archive Node source (don't delete — WhatsApp might return)
+- [x] Update CLAUDE.md, AGENTS.md
 - [ ] Update container build scripts if they reference Node
 
 ### Phase 4: Simplify Config
-- [ ] Remove `server.host_callback_url` from intercom.toml
-- [ ] Remove `TELEGRAM_ONLY` env var (it's always Telegram-only now)
-- [ ] Remove outbox mode (no longer needed — Rust writes directly)
-- [ ] Simplify deployment docs
+- [x] Remove `server.host_callback_url` from intercom.toml (commented out in example)
+- [x] Remove `TELEGRAM_ONLY` env var (it's always Telegram-only now)
+- [x] Remove outbox mode (no longer needed — Rust writes directly)
+- [x] Simplify deployment docs (AGENTS.md updated)
 
 ## Key Design Decisions
 

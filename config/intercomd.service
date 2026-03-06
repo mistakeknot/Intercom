@@ -1,9 +1,7 @@
 [Unit]
-Description=Intercom Rust daemon (IPC bridge, event consumer, Telegram bridge)
+Description=Intercom daemon (Telegram polling, orchestration, container dispatch)
 After=network-online.target
 Wants=network-online.target
-# Start before intercom.service so IPC queries are handled from boot
-Before=intercom.service
 
 [Service]
 Type=simple
@@ -19,7 +17,6 @@ TimeoutStopSec=10
 
 # Environment overrides (uncomment to customize)
 # Environment=INTERCOMD_BIND=127.0.0.1:7340
-# Environment=HOST_CALLBACK_URL=http://127.0.0.1:7341
 # Environment=RUST_LOG=intercomd=info
 
 [Install]

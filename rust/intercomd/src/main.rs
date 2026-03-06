@@ -428,8 +428,10 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
                 }
             }
 
-            if state.config.orchestrator.use_outbox {
+            if state.config.orchestrator.use_outbox && !telegram_only {
                 // Outbox mode: drain loop + LISTEN/NOTIFY
+                // Only needed when Node writes to message_outbox. In Telegram-only
+                // mode, the Rust poller writes directly to messages + enqueues.
                 info!("outbox mode enabled — spawning drain + LISTEN loops");
 
                 let (drain_tx, drain_rx) = tokio::sync::mpsc::channel::<()>(16);
@@ -457,6 +459,10 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
                 outbox_cleanup_handle = Some(tokio::spawn(async move {
                     outbox::run_outbox_cleanup(cleanup_pool, cleanup_shutdown).await;
                 }));
+            } else if telegram_only {
+                // Telegram-only mode: the poller writes directly to Postgres
+                // and calls enqueue_message_check(). No outbox or polling needed.
+                info!("Telegram-only mode — outbox and message_loop disabled (poller handles ingress)");
             } else {
                 // Legacy polling mode
                 info!("legacy polling mode — spawning message_loop");
