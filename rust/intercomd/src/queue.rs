@@ -15,9 +15,13 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use futures::FutureExt;
+use intercom_core::ContainerOutput;
+use tokio::process::Child;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 const MAX_RETRIES: u32 = 5;
@@ -38,8 +42,26 @@ struct QueuedTask {
     task_fn: TaskFn,
 }
 
+/// A warm (long-running) container that persists between messages.
+/// Held inside GroupState — single state owner prevents dual-state-machine bugs.
+pub struct PoolContainer {
+    /// Name of the running Docker container.
+    pub container_name: String,
+    /// The foreground Docker child process (for crash detection via wait()).
+    pub child: Child,
+    /// When this container was spawned.
+    pub started_at: Instant,
+    /// Last time a message was sent to this container (for idle reaping).
+    pub last_activity: Instant,
+    /// Background task monitoring child process exit.
+    pub exit_monitor: JoinHandle<()>,
+    /// Background task reading UDS output frames.
+    pub uds_listener: JoinHandle<()>,
+    /// Channel for sending output frames to per-message delivery handlers.
+    pub delivery_tx: tokio::sync::mpsc::Sender<ContainerOutput>,
+}
+
 /// Per-group state tracked by the queue.
-#[derive(Default)]
 struct GroupState {
     active: bool,
     idle_waiting: bool,
@@ -49,6 +71,24 @@ struct GroupState {
     container_name: Option<String>,
     group_folder: Option<String>,
     retry_count: u32,
+    /// Warm container for this group (None = cold, must spawn fresh).
+    pool_container: Option<PoolContainer>,
+}
+
+impl Default for GroupState {
+    fn default() -> Self {
+        Self {
+            active: false,
+            idle_waiting: false,
+            is_task_container: false,
+            pending_messages: false,
+            pending_tasks: VecDeque::new(),
+            container_name: None,
+            group_folder: None,
+            retry_count: 0,
+            pool_container: None,
+        }
+    }
 }
 
 /// Shared inner state behind a mutex.
@@ -74,7 +114,10 @@ impl Inner {
             state.active = false;
             state.is_task_container = false;
             state.container_name = None;
-            state.group_folder = None;
+            // Note: group_folder is intentionally NOT cleared — it's needed
+            // for pool container operations even when no container is active.
+            // pool_container is NOT cleared here either — warm containers
+            // persist across message processing cycles.
         }
         self.active_count = self.active_count.saturating_sub(1);
     }
@@ -378,6 +421,111 @@ impl GroupQueue {
     pub async fn active_count(&self) -> usize {
         self.inner.lock().await.active_count
     }
+
+    /// Check if a group has a warm (pool) container ready.
+    pub async fn has_warm_container(&self, group_jid: &str) -> bool {
+        let inner = self.inner.lock().await;
+        inner
+            .groups
+            .get(group_jid)
+            .and_then(|s| s.pool_container.as_ref())
+            .is_some()
+    }
+
+    /// Store a warm container for a group. Called after pool_spawn() succeeds.
+    pub async fn set_pool_container(&self, group_jid: &str, pc: PoolContainer) {
+        let mut inner = self.inner.lock().await;
+        let state = inner.get_or_insert(group_jid);
+        state.pool_container = Some(pc);
+        info!(group_jid, container = state.pool_container.as_ref().unwrap().container_name.as_str(), "warm container registered");
+    }
+
+    /// Send a message to a warm container via IPC file. Returns a receiver
+    /// for output frames, or None if no warm container exists.
+    pub async fn send_to_warm_container(
+        &self,
+        group_jid: &str,
+        text: &str,
+    ) -> Option<tokio::sync::mpsc::Receiver<ContainerOutput>> {
+        let mut inner = self.inner.lock().await;
+
+        // Extract what we need before the mutable borrow
+        let data_dir = inner.data_dir.clone();
+        let state = inner.groups.get_mut(group_jid)?;
+
+        if state.pool_container.is_none() {
+            return None;
+        }
+
+        // Validate and build input path
+        let folder = state.group_folder.as_ref()?;
+        if folder.is_empty() || folder.contains("..") || folder.contains('/') || folder.contains('\\') {
+            error!(group_jid, folder = folder.as_str(), "refusing IPC message for invalid group_folder");
+            return None;
+        }
+        let input_dir = data_dir.join("ipc").join(folder).join("input");
+        if !write_ipc_message(&input_dir, text) {
+            return None;
+        }
+
+        // Update last activity and create delivery channel
+        let pc = state.pool_container.as_mut().unwrap();
+        pc.last_activity = Instant::now();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1000);
+        pc.delivery_tx = tx;
+        Some(rx)
+    }
+
+    /// Remove the warm container for a group (on crash, reaping, or shutdown).
+    pub async fn clear_pool_container(&self, group_jid: &str) {
+        let mut inner = self.inner.lock().await;
+        if let Some(state) = inner.groups.get_mut(group_jid) {
+            if let Some(pc) = state.pool_container.take() {
+                pc.exit_monitor.abort();
+                pc.uds_listener.abort();
+                info!(group_jid, container = pc.container_name.as_str(), "warm container cleared");
+            }
+        }
+    }
+
+    /// Get the data_dir path.
+    pub async fn data_dir(&self) -> PathBuf {
+        self.inner.lock().await.data_dir.clone()
+    }
+
+    /// Iterate all groups with warm containers for idle reaping.
+    /// Returns (group_jid, group_folder, container_name, last_activity) for each warm container.
+    pub async fn warm_containers(&self) -> Vec<(String, String, String, Instant)> {
+        let inner = self.inner.lock().await;
+        inner.groups.iter()
+            .filter_map(|(jid, state)| {
+                let pc = state.pool_container.as_ref()?;
+                let folder = state.group_folder.as_ref()?;
+                Some((jid.clone(), folder.clone(), pc.container_name.clone(), pc.last_activity))
+            })
+            .collect()
+    }
+
+    /// Purge stale IPC input files for a group (after container exit).
+    pub async fn purge_stale_ipc(&self, group_folder: &str) {
+        let data_dir = self.inner.lock().await.data_dir.clone();
+        let input_dir = data_dir.join("ipc").join(group_folder).join("input");
+        if let Ok(entries) = std::fs::read_dir(&input_dir) {
+            let mut count = 0;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "json") {
+                    if std::fs::remove_file(&path).is_ok() {
+                        count += 1;
+                    }
+                }
+            }
+            if count > 0 {
+                warn!(group_folder, count, "purged stale IPC input files");
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -607,6 +755,71 @@ fn next_ipc_counter() -> u64 {
     IPC_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
+// ---------------------------------------------------------------------------
+// Pool idle reaping loop
+// ---------------------------------------------------------------------------
+
+/// Background task that reaps warm containers idle beyond the configured timeout.
+/// Runs every 60s, checks last_activity for each warm container.
+pub async fn run_pool_reaper(
+    queue: Arc<GroupQueue>,
+    idle_timeout_secs: u64,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    let check_interval = std::time::Duration::from_secs(60);
+    let idle_timeout = std::time::Duration::from_secs(idle_timeout_secs);
+
+    info!(idle_timeout_secs, "pool reaper started");
+
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(check_interval) => {}
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    info!("pool reaper shutting down");
+                    // On shutdown: reap all warm containers
+                    let containers = queue.warm_containers().await;
+                    for (jid, folder, container_name, _) in &containers {
+                        info!(container = container_name.as_str(), group = folder.as_str(), "shutdown: stopping warm container");
+                        // Write close sentinel so container exits gracefully
+                        let data_dir = queue.data_dir().await;
+                        write_close_sentinel(&data_dir, folder);
+                    }
+                    // Give containers a grace period to exit
+                    if !containers.is_empty() {
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                        // Force-stop any that didn't exit
+                        for (jid, folder, container_name, _) in &containers {
+                            let _ = tokio::process::Command::new("docker")
+                                .args(["stop", "-t", "5", container_name])
+                                .output()
+                                .await;
+                            queue.purge_stale_ipc(folder).await;
+                            queue.clear_pool_container(jid).await;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        let containers = queue.warm_containers().await;
+        for (jid, folder, container_name, last_activity) in containers {
+            if last_activity.elapsed() > idle_timeout {
+                info!(
+                    container = container_name.as_str(),
+                    group = folder.as_str(),
+                    idle_secs = last_activity.elapsed().as_secs(),
+                    "reaping idle warm container"
+                );
+                let data_dir = queue.data_dir().await;
+                write_close_sentinel(&data_dir, &folder);
+                // The exit monitor will handle cleanup when the container exits
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -668,5 +881,118 @@ mod tests {
             })
             .collect();
         assert_eq!(files.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn has_warm_container_returns_false_initially() {
+        let q = GroupQueue::new(3, PathBuf::from("/tmp/test-pool"));
+        assert!(!q.has_warm_container("tg:123").await);
+    }
+
+    #[tokio::test]
+    async fn set_and_clear_pool_container() {
+        let q = GroupQueue::new(3, PathBuf::from("/tmp/test-pool"));
+        let (tx, _rx) = tokio::sync::mpsc::channel(10);
+        let pc = PoolContainer {
+            container_name: "test-container".into(),
+            child: tokio::process::Command::new("true").spawn().unwrap(),
+            started_at: Instant::now(),
+            last_activity: Instant::now(),
+            exit_monitor: tokio::spawn(async {}),
+            uds_listener: tokio::spawn(async {}),
+            delivery_tx: tx,
+        };
+        q.set_pool_container("tg:123", pc).await;
+        assert!(q.has_warm_container("tg:123").await);
+
+        q.clear_pool_container("tg:123").await;
+        assert!(!q.has_warm_container("tg:123").await);
+    }
+
+    #[tokio::test]
+    async fn warm_containers_lists_pool_entries() {
+        let q = GroupQueue::new(3, PathBuf::from("/tmp/test-pool"));
+
+        // Register a group folder first
+        q.register_process("tg:456", "cont-456", Some("group-a")).await;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(10);
+        let pc = PoolContainer {
+            container_name: "cont-456".into(),
+            child: tokio::process::Command::new("true").spawn().unwrap(),
+            started_at: Instant::now(),
+            last_activity: Instant::now(),
+            exit_monitor: tokio::spawn(async {}),
+            uds_listener: tokio::spawn(async {}),
+            delivery_tx: tx,
+        };
+        q.set_pool_container("tg:456", pc).await;
+
+        let warm = q.warm_containers().await;
+        assert_eq!(warm.len(), 1);
+        assert_eq!(warm[0].0, "tg:456");
+        assert_eq!(warm[0].1, "group-a");
+        assert_eq!(warm[0].2, "cont-456");
+    }
+
+    #[tokio::test]
+    async fn send_to_warm_container_returns_none_without_pool() {
+        let q = GroupQueue::new(3, PathBuf::from("/tmp/test-pool"));
+        let result = q.send_to_warm_container("tg:789", "hello").await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn send_to_warm_container_writes_ipc_and_returns_rx() {
+        let dir = tempfile::tempdir().unwrap();
+        let q = GroupQueue::new(3, dir.path().to_path_buf());
+
+        // Set up group state with folder
+        q.register_process("tg:100", "cont-100", Some("group-b")).await;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(10);
+        let pc = PoolContainer {
+            container_name: "cont-100".into(),
+            child: tokio::process::Command::new("true").spawn().unwrap(),
+            started_at: Instant::now(),
+            last_activity: Instant::now(),
+            exit_monitor: tokio::spawn(async {}),
+            uds_listener: tokio::spawn(async {}),
+            delivery_tx: tx,
+        };
+        q.set_pool_container("tg:100", pc).await;
+
+        let result = q.send_to_warm_container("tg:100", "test message").await;
+        assert!(result.is_some());
+
+        // Verify IPC file was written
+        let input_dir = dir.path().join("ipc").join("group-b").join("input");
+        let files: Vec<_> = std::fs::read_dir(&input_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+            .collect();
+        assert_eq!(files.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn purge_stale_ipc_removes_json_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let q = GroupQueue::new(3, dir.path().to_path_buf());
+
+        let input_dir = dir.path().join("ipc").join("test-purge").join("input");
+        std::fs::create_dir_all(&input_dir).unwrap();
+        std::fs::write(input_dir.join("stale.json"), "{}").unwrap();
+        std::fs::write(input_dir.join("stale2.json"), "{}").unwrap();
+        std::fs::write(input_dir.join("_close"), "").unwrap(); // Not JSON, should survive
+
+        q.purge_stale_ipc("test-purge").await;
+
+        let remaining: Vec<_> = std::fs::read_dir(&input_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].file_name().to_str().unwrap(), "_close");
     }
 }

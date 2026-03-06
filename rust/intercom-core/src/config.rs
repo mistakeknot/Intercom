@@ -15,6 +15,34 @@ pub struct IntercomConfig {
     pub events: EventsConfig,
     pub orchestrator: OrchestratorConfig,
     pub scheduler: SchedulerConfig,
+    pub pool: PoolConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PoolConfig {
+    /// Enable warm container pool (long-running containers).
+    pub enabled: bool,
+    /// Prewarm containers for all registered groups at startup.
+    pub prewarm: bool,
+    /// Idle timeout before reaping warm containers (seconds).
+    pub idle_timeout_secs: u64,
+    /// Maximum number of concurrent warm containers.
+    pub max_containers: usize,
+    /// Memory warning threshold in MB (for monitoring).
+    pub memory_warn_mb: u64,
+}
+
+impl Default for PoolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            prewarm: false,
+            idle_timeout_secs: 1800,
+            max_containers: 20,
+            memory_warn_mb: 4096,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

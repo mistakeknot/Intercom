@@ -668,6 +668,188 @@ pub async fn run_container_agent(
     }
 }
 
+/// Spawn a long-running (pool-managed) container for a group.
+///
+/// Unlike `run_container_agent()` which runs one message and exits, this spawns
+/// a container that stays alive between messages. The container processes its
+/// first message from stdin, then subsequent messages arrive via IPC files.
+///
+/// Returns a `PoolContainer` handle containing the child process, UDS listener,
+/// exit monitor, and a delivery channel for output frames.
+pub async fn pool_spawn(
+    group: &GroupInfo,
+    input: &ContainerInput,
+    runtime: RuntimeKind,
+    is_main: bool,
+    config: &RunConfig,
+) -> anyhow::Result<(crate::queue::PoolContainer, tokio::sync::mpsc::Receiver<ContainerOutput>)> {
+    // Ensure group directory exists
+    let group_dir = config.groups_dir.join(&group.folder);
+    tokio::fs::create_dir_all(&group_dir).await.ok();
+    let logs_dir = group_dir.join("logs");
+    tokio::fs::create_dir_all(&logs_dir).await.ok();
+
+    // Build mounts and container args (no --rm for pool containers)
+    let mounts = build_volume_mounts(
+        group,
+        is_main,
+        runtime,
+        &config.project_root,
+        &config.groups_dir,
+        &config.data_dir,
+        config.allowlist.as_ref(),
+    );
+
+    let name = container_name(&group.folder);
+    let image = container_image(runtime);
+    let container_args =
+        super::secrets::build_pool_container_args(&mounts, &name, image, &config.timezone);
+
+    // Bind UDS listener for container output
+    let ipc_dir = config.data_dir.join("ipc").join(&group.folder);
+    let uds_socket_path = ipc_dir.join("output.sock");
+    tokio::fs::remove_file(&uds_socket_path).await.ok();
+    let uds_listener = UnixListener::bind(&uds_socket_path)
+        .map_err(|e| anyhow::anyhow!("Failed to bind UDS for pool container: {}", e))?;
+
+    debug!(path = %uds_socket_path.display(), "UDS output listener bound for pool container");
+
+    info!(
+        group = %group.name,
+        container_name = %name,
+        mount_count = mounts.len(),
+        is_main,
+        runtime = runtime.as_str(),
+        "Spawning pool container (warm)"
+    );
+
+    // Spawn the container process (foreground, NOT -d, NOT --rm)
+    let mut child = Command::new(CONTAINER_RUNTIME_BIN)
+        .args(&container_args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to spawn pool container: {}", e))?;
+
+    // Write input + secrets to stdin (first message only)
+    let mut stdin_input = input.clone();
+    stdin_input.secrets = Some(super::secrets::read_secrets(&config.project_root));
+    let input_json = serde_json::to_string(&stdin_input)?;
+    drop(stdin_input);
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(input_json.as_bytes()).await?;
+        stdin.shutdown().await.ok();
+    }
+
+    // Create the delivery channel (bounded to prevent backpressure issues)
+    let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel::<ContainerOutput>(1000);
+
+    // Spawn UDS listener task — persistent, reads frames and forwards to delivery channel
+    let uds_name = name.clone();
+    let uds_group = group.name.clone();
+    let uds_tx = delivery_tx.clone();
+    let uds_handle = tokio::spawn(async move {
+        loop {
+            match uds_listener.accept().await {
+                Ok((stream, _)) => {
+                    info!(group = %uds_group, "UDS connection accepted (pool container)");
+                    let mut reader = UdsFrameReader::new(stream);
+                    loop {
+                        match reader.read_frame().await {
+                            Ok(Some(json_str)) => {
+                                match serde_json::from_str::<ContainerOutput>(&json_str) {
+                                    Ok(parsed) => {
+                                        if uds_tx.send(parsed).await.is_err() {
+                                            debug!(container = %uds_name, "delivery channel closed, UDS listener stopping");
+                                            return;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(container = %uds_name, error = %e, "Failed to parse UDS frame in pool container");
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                debug!(container = %uds_name, "UDS connection closed by pool container");
+                                break; // Wait for reconnect
+                            }
+                            Err(e) => {
+                                warn!(container = %uds_name, error = %e, "UDS read error in pool container");
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(container = %uds_name, error = %e, "UDS accept error in pool container");
+                    break;
+                }
+            }
+        }
+    });
+
+    // Drain stdout/stderr in background (prevent pipe buffer deadlock)
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let drain_name = name.clone();
+    let drain_group = group.folder.clone();
+    tokio::spawn(async move {
+        if let Some(stdout) = stdout {
+            let mut reader = BufReader::new(stdout);
+            let mut buf = String::new();
+            loop {
+                match reader.read_line(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        buf.clear();
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    });
+    let stderr_name = drain_name.clone();
+    tokio::spawn(async move {
+        if let Some(stderr) = stderr {
+            let mut reader = BufReader::new(stderr);
+            let mut buf = String::new();
+            loop {
+                match reader.read_line(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let line = buf.trim();
+                        if !line.is_empty() {
+                            debug!(container = %stderr_name, "{}", line);
+                        }
+                        buf.clear();
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    });
+
+    // Exit monitor is set up by the caller (process_group.rs) since it
+    // needs access to the GroupQueue to clear pool_container on crash.
+    // We use a placeholder no-op handle here — caller replaces it.
+    let exit_monitor = tokio::spawn(async {});
+
+    let now = std::time::Instant::now();
+    let pool_container = crate::queue::PoolContainer {
+        container_name: name,
+        child,
+        started_at: now,
+        last_activity: now,
+        exit_monitor,
+        uds_listener: uds_handle,
+        delivery_tx,
+    };
+
+    Ok((pool_container, delivery_rx))
+}
+
 /// Helper: check if the buffer contains no OUTPUT markers (nothing was consumed).
 fn consumed_none(buf: &str) -> bool {
     !buf.contains(intercom_core::OUTPUT_START_MARKER)

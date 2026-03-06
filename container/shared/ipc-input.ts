@@ -41,6 +41,12 @@ export function drainIpcInput(): string[] {
       try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
         fs.unlinkSync(filePath);
+        if (data.type === 'ping') {
+          // Health check from host — respond with pong via IPC output
+          const pongPath = path.join('/workspace/ipc', 'pong.json');
+          try { fs.writeFileSync(pongPath, JSON.stringify({ type: 'pong' })); } catch { /* ignore */ }
+          continue;
+        }
         if (data.type === 'message' && data.text) {
           messages.push(data.text);
         }

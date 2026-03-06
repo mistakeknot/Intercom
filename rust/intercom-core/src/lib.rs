@@ -6,7 +6,7 @@ pub mod persistence;
 pub mod runtime;
 
 pub use config::{
-    EventsConfig, IntercomConfig, OrchestratorConfig, SchedulerConfig, load_config,
+    EventsConfig, IntercomConfig, OrchestratorConfig, PoolConfig, SchedulerConfig, load_config,
 };
 pub use container::{
     ContainerInput, ContainerOutput, ContainerStatus, StreamEvent, VolumeMount,

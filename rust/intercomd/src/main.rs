@@ -397,6 +397,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
                 assistant_name.clone(),
                 state.config.orchestrator.main_group_folder.clone(),
                 run_config.clone(),
+                state.config.pool.clone(),
             );
             state.queue.set_process_messages_fn(process_fn).await;
 
@@ -517,6 +518,23 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         }
     }
 
+    // Pool idle reaper — reaps warm containers that have been idle too long
+    let mut pool_reaper_handle: Option<tokio::task::JoinHandle<()>> = None;
+    if state.config.pool.enabled {
+        let reaper_queue = state.queue.clone();
+        let reaper_shutdown = shutdown_rx.clone();
+        let idle_timeout = state.config.pool.idle_timeout_secs;
+        pool_reaper_handle = Some(tokio::spawn(async move {
+            queue::run_pool_reaper(reaper_queue, idle_timeout, reaper_shutdown).await;
+        }));
+        info!(
+            idle_timeout_secs = state.config.pool.idle_timeout_secs,
+            max_containers = state.config.pool.max_containers,
+            prewarm = state.config.pool.prewarm,
+            "warm container pool enabled"
+        );
+    }
+
     // Telegram update poller — replaces Node/grammY for inbound messages
     let mut telegram_poller_handle: Option<tokio::task::JoinHandle<()>> = None;
     if state.telegram.is_enabled() {
@@ -632,6 +650,9 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         let _ = h.await;
     }
     if let Some(h) = telegram_poller_handle {
+        let _ = h.await;
+    }
+    if let Some(h) = pool_reaper_handle {
         let _ = h.await;
     }
 

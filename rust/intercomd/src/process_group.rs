@@ -25,11 +25,13 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use crate::container::mounts::GroupInfo;
-use crate::container::runner::{OutputCallback, RunConfig, run_container_agent, write_snapshots};
+use crate::container::runner::{OutputCallback, RunConfig, pool_spawn, run_container_agent, write_snapshots};
 use crate::container::security::ContainerConfig;
 use crate::message_loop::{self, AgentTimestamps};
 use crate::queue::{GroupQueue, ProcessMessagesFn};
 use crate::telegram::TelegramBridge;
+
+use intercom_core::PoolConfig;
 
 /// Build the `ProcessMessagesFn` closure that GroupQueue invokes for message processing.
 ///
@@ -44,6 +46,7 @@ pub fn build_process_messages_fn(
     assistant_name: String,
     main_group_folder: String,
     run_config: RunConfig,
+    pool_config: PoolConfig,
 ) -> ProcessMessagesFn {
     Arc::new(move |chat_jid: String| {
         let pool = pool.clone();
@@ -55,6 +58,7 @@ pub fn build_process_messages_fn(
         let assistant_name = assistant_name.clone();
         let main_group_folder = main_group_folder.clone();
         let run_config = run_config.clone();
+        let pool_config = pool_config.clone();
 
         Box::pin(async move {
             match process_group_messages(
@@ -68,6 +72,7 @@ pub fn build_process_messages_fn(
                 &assistant_name,
                 &main_group_folder,
                 &run_config,
+                &pool_config,
             )
             .await
             {
@@ -93,6 +98,7 @@ async fn process_group_messages(
     assistant_name: &str,
     main_group_folder: &str,
     run_config: &RunConfig,
+    pool_config: &PoolConfig,
 ) -> anyhow::Result<bool> {
     // 1. Look up group
     let group = {
@@ -163,6 +169,7 @@ async fn process_group_messages(
         s.get(&group.folder).cloned()
     };
 
+    let prompt_for_ipc = prompt.clone();
     let input = ContainerInput {
         prompt,
         session_id,
@@ -216,7 +223,260 @@ async fn process_group_messages(
     let output_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let output_sent_cb = output_sent.clone();
 
-    // 5c. Send typing indicator and start periodic refresh
+    // 5c. Check for warm container (pool path)
+    if pool_config.enabled && queue.has_warm_container(chat_jid).await {
+        info!(group = group.name.as_str(), "using warm container for message delivery");
+
+        // Send message via IPC and get delivery channel
+        if let Some(mut delivery_rx) = queue.send_to_warm_container(chat_jid, &prompt_for_ipc).await {
+            // Start typing indicator
+            let is_telegram = chat_jid.starts_with("tg:");
+            if is_telegram {
+                telegram.send_typing(chat_jid).await;
+            }
+            let typing_cancel = Arc::new(Notify::new());
+            let typing_handle: Option<JoinHandle<()>> = if is_telegram {
+                let tg = telegram.clone();
+                let jid = chat_jid.to_string();
+                let cancel = typing_cancel.clone();
+                Some(tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(Duration::from_secs(4));
+                    interval.tick().await;
+                    loop {
+                        tokio::select! {
+                            _ = interval.tick() => { tg.send_typing(&jid).await; }
+                            _ = cancel.notified() => { break; }
+                        }
+                    }
+                }))
+            } else {
+                None
+            };
+
+            // Process output frames from the delivery channel
+            let sessions_clone = sessions.clone();
+            let group_folder = group.folder.clone();
+            let pool_cb = pool.clone();
+            let queue_cb = queue.clone();
+            let chat_jid_owned = chat_jid.to_string();
+
+            while let Some(output) = delivery_rx.recv().await {
+                // Track session ID
+                if let Some(ref sid) = output.new_session_id {
+                    let mut s = sessions_clone.write().await;
+                    s.insert(group_folder.clone(), sid.clone());
+                    if let Err(e) = pool_cb.set_session(&group_folder, sid).await {
+                        warn!(err = %e, "failed to persist session");
+                    }
+                }
+
+                // Handle final result
+                if let Some(ref result_text) = output.result {
+                    let text = strip_internal_blocks(result_text);
+                    if !text.is_empty() {
+                        // Persist before deliver
+                        let bot_msg = intercom_core::NewMessage {
+                            id: format!("bot-{}", chrono::Utc::now().timestamp_millis()),
+                            chat_jid: chat_jid_owned.clone(),
+                            sender: "bot".into(),
+                            sender_name: assistant_name.to_string(),
+                            content: text.clone(),
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            is_from_me: true,
+                            is_bot_message: true,
+                        };
+                        if let Err(e) = pool_cb.store_message(&bot_msg).await {
+                            warn!(err = %e, "failed to store bot response (warm)");
+                        }
+
+                        typing_cancel.notify_one();
+                        if let Err(e) = telegram.send_text_to_jid(&chat_jid_owned, &text).await {
+                            error!(err = %e, "failed to send agent output via Telegram (warm)");
+                        }
+                        output_sent.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+
+                // Container signals idle — this message is done
+                if output.status == ContainerStatus::Success && output.result.is_none() {
+                    queue_cb.notify_idle(&chat_jid_owned).await;
+                    break;
+                }
+            }
+
+            typing_cancel.notify_one();
+            if let Some(handle) = typing_handle {
+                handle.abort();
+            }
+
+            return Ok(true);
+        }
+        // If send_to_warm_container returned None, fall through to cold spawn
+        warn!(group = group.name.as_str(), "warm container send failed, falling back to cold spawn");
+    }
+
+    // 5e. Pool spawn path: if pool is enabled and this is the first message,
+    // spawn via pool_spawn() instead of run_container_agent() so the container
+    // stays alive for subsequent messages.
+    if pool_config.enabled {
+        info!(group = group.name.as_str(), "spawning pool container (first message, cold start)");
+
+        // Start typing indicator
+        let is_telegram = chat_jid.starts_with("tg:");
+        if is_telegram {
+            telegram.send_typing(chat_jid).await;
+        }
+        let typing_cancel = Arc::new(Notify::new());
+        let typing_handle: Option<JoinHandle<()>> = if is_telegram {
+            let tg = telegram.clone();
+            let jid = chat_jid.to_string();
+            let cancel = typing_cancel.clone();
+            Some(tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(4));
+                interval.tick().await;
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => { tg.send_typing(&jid).await; }
+                        _ = cancel.notified() => { break; }
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
+        // Write task/group snapshots before spawning
+        {
+            let tasks_json = match pool.get_all_tasks().await {
+                Ok(tasks) => {
+                    let filtered: Vec<_> = if is_main {
+                        tasks
+                    } else {
+                        tasks.into_iter().filter(|t| t.group_folder == group.folder).collect()
+                    };
+                    serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".into())
+                }
+                Err(e) => {
+                    warn!(err = %e, "failed to load tasks for snapshot");
+                    "[]".into()
+                }
+            };
+            let groups_json = {
+                let g = groups.read().await;
+                let entries: Vec<_> = g.values().map(|rg| serde_json::json!({
+                    "jid": rg.jid,
+                    "name": rg.name,
+                    "folder": rg.folder,
+                })).collect();
+                serde_json::to_string(&entries).unwrap_or_else(|_| "[]".into())
+            };
+            write_snapshots(&run_config.data_dir, &group.folder, is_main, &tasks_json, &groups_json).await;
+        }
+
+        match pool_spawn(&group_info, &input, runtime, is_main, run_config).await {
+            Ok((mut pc, mut delivery_rx)) => {
+                let container_name = pc.container_name.clone();
+
+                // Register the process in the queue for IPC features
+                queue.register_process(chat_jid, &container_name, Some(group.folder.as_str())).await;
+
+                // Set up exit monitor that clears pool_container on crash
+                let exit_queue = queue.clone();
+                let exit_jid = chat_jid.to_string();
+                let exit_folder = group.folder.clone();
+                let exit_name = container_name.clone();
+                pc.exit_monitor.abort(); // Cancel the placeholder
+                pc.exit_monitor = tokio::spawn(async move {
+                    // Wait for child process to exit — this blocks until the container dies
+                    // Note: child is moved into PoolContainer, so we monitor via docker wait
+                    let result = tokio::process::Command::new("docker")
+                        .args(["wait", &exit_name])
+                        .output()
+                        .await;
+                    match result {
+                        Ok(output) => {
+                            let code = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                            warn!(container = %exit_name, exit_code = %code, "pool container exited");
+                        }
+                        Err(e) => {
+                            error!(container = %exit_name, err = %e, "docker wait failed");
+                        }
+                    }
+                    // Purge stale IPC files, then clear pool container state
+                    exit_queue.purge_stale_ipc(&exit_folder).await;
+                    exit_queue.clear_pool_container(&exit_jid).await;
+                });
+
+                // Store the warm container
+                queue.set_pool_container(chat_jid, pc).await;
+
+                // Process output frames from the delivery channel
+                let sessions_clone = sessions.clone();
+                let group_folder = group.folder.clone();
+                let pool_cb = pool.clone();
+                let queue_cb = queue.clone();
+                let chat_jid_owned = chat_jid.to_string();
+
+                while let Some(output) = delivery_rx.recv().await {
+                    if let Some(ref sid) = output.new_session_id {
+                        let mut s = sessions_clone.write().await;
+                        s.insert(group_folder.clone(), sid.clone());
+                        if let Err(e) = pool_cb.set_session(&group_folder, sid).await {
+                            warn!(err = %e, "failed to persist session");
+                        }
+                    }
+
+                    if let Some(ref result_text) = output.result {
+                        let text = strip_internal_blocks(result_text);
+                        if !text.is_empty() {
+                            let bot_msg = intercom_core::NewMessage {
+                                id: format!("bot-{}", chrono::Utc::now().timestamp_millis()),
+                                chat_jid: chat_jid_owned.clone(),
+                                sender: "bot".into(),
+                                sender_name: assistant_name.to_string(),
+                                content: text.clone(),
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                is_from_me: true,
+                                is_bot_message: true,
+                            };
+                            if let Err(e) = pool_cb.store_message(&bot_msg).await {
+                                warn!(err = %e, "failed to store bot response (pool spawn)");
+                            }
+
+                            typing_cancel.notify_one();
+                            if let Err(e) = telegram.send_text_to_jid(&chat_jid_owned, &text).await {
+                                error!(err = %e, "failed to send agent output via Telegram (pool spawn)");
+                            }
+                            output_sent.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+
+                    // Container signals idle — first message done, container stays warm
+                    if output.status == ContainerStatus::Success && output.result.is_none() {
+                        queue_cb.notify_idle(&chat_jid_owned).await;
+                        break;
+                    }
+                }
+
+                typing_cancel.notify_one();
+                if let Some(handle) = typing_handle {
+                    handle.abort();
+                }
+
+                return Ok(true);
+            }
+            Err(e) => {
+                warn!(group = group.name.as_str(), err = %e, "pool_spawn failed, falling back to cold container");
+                typing_cancel.notify_one();
+                if let Some(handle) = typing_handle {
+                    handle.abort();
+                }
+                // Fall through to legacy run_container_agent path
+            }
+        }
+    }
+
+    // 5f. Legacy cold start — send typing indicator and start periodic refresh
     let is_telegram = chat_jid.starts_with("tg:");
     if is_telegram {
         telegram.send_typing(chat_jid).await;

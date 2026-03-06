@@ -108,20 +108,45 @@ pub fn read_secrets(project_root: &Path) -> HashMap<String, String> {
 /// Build the Docker CLI args for running a container.
 ///
 /// Constructs `docker run -i --rm --name {name} -e TZ=... --user ... -v ... {image}`.
+/// When `pool_managed` is true, omits `--rm` so the container persists between messages.
 pub fn build_container_args(
     mounts: &[intercom_core::VolumeMount],
     container_name: &str,
     image: &str,
     timezone: &str,
 ) -> Vec<String> {
+    build_container_args_inner(mounts, container_name, image, timezone, false)
+}
+
+/// Build Docker CLI args for a pool-managed container (no --rm).
+pub fn build_pool_container_args(
+    mounts: &[intercom_core::VolumeMount],
+    container_name: &str,
+    image: &str,
+    timezone: &str,
+) -> Vec<String> {
+    build_container_args_inner(mounts, container_name, image, timezone, true)
+}
+
+fn build_container_args_inner(
+    mounts: &[intercom_core::VolumeMount],
+    container_name: &str,
+    image: &str,
+    timezone: &str,
+    pool_managed: bool,
+) -> Vec<String> {
     let mut args = vec![
         "run".to_string(),
         "-i".to_string(),
-        "--rm".to_string(),
+    ];
+    if !pool_managed {
+        args.push("--rm".to_string());
+    }
+    args.extend([
         "--pull=never".to_string(),
         "--name".to_string(),
         container_name.to_string(),
-    ];
+    ]);
 
     // Pass host timezone
     args.push("-e".to_string());
@@ -231,6 +256,16 @@ mod tests {
         let result = read_env_file(&env_path, &["EMPTY", "VALID"]);
         assert!(!result.contains_key("EMPTY"));
         assert_eq!(result.get("VALID").map(|s| s.as_str()), Some("yes"));
+    }
+
+    #[test]
+    fn build_pool_container_args_omits_rm() {
+        let mounts = vec![];
+        let args = build_pool_container_args(&mounts, "pool-test", "intercom-agent:latest", "UTC");
+        assert!(args.contains(&"-i".to_string()));
+        assert!(!args.contains(&"--rm".to_string()), "--rm should NOT be present for pool containers");
+        assert!(args.contains(&"--name".to_string()));
+        assert!(args.contains(&"pool-test".to_string()));
     }
 
     #[test]
