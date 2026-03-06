@@ -61,10 +61,10 @@ Telegram API → Rust update poller → Postgres directly → message_loop → c
 
 ### Phase 3: Clean Up Node
 - [x] Stop `intercom.service` (systemd)
-- [ ] Remove `intercom.service` unit file
+- [x] Remove `intercom.service` unit file (never existed in config/ — only intercomd.service)
 - [x] Archive Node source (don't delete — WhatsApp might return)
 - [x] Update CLAUDE.md, AGENTS.md
-- [ ] Update container build scripts if they reference Node
+- [x] Update container build scripts if they reference Node (verified clean — Node in containers is runner code, not host)
 
 ### Phase 4: Simplify Config
 - [x] Remove `server.host_callback_url` from intercom.toml (commented out in example)
