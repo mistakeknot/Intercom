@@ -1,37 +1,32 @@
-# Message Flow (Outbox Mode)
+# Message Flow (Telegram-Only Mode)
 
-When `orchestrator.use_outbox=true` (production default), messages flow through a durable outbox pipeline:
+In production, intercomd handles the full message lifecycle directly:
 
 ```
-WhatsApp/Telegram message arrives
+Telegram API (getUpdates long-polling)
         |
         v
-  Node Host (channel layer)
+  telegram_poller.rs: parse update, match trigger, download media
         |
         v
-  pg-writer.ts: INSERT INTO message_outbox
+  Postgres: store_message() + store_chat_metadata()
         |
         v
-  Postgres trigger: NOTIFY intercom_outbox
-        |
-        v
-  outbox.rs LISTEN loop: receives notification
-        |
-        v
-  outbox.rs drain loop: claim rows → store_message() → queue.enqueue_message_check()
+  queue.rs: enqueue_message_check()
         |
         v
   process_group.rs: container dispatch (with typing indicator)
+        |
+        v
+  TelegramBridge: send response chunks via Bot API
 ```
 
 **Key properties:**
-- **Durable**: messages survive Node/Rust restarts (persisted in Postgres before processing)
-- **At-least-once**: stale `processing` rows recovered at startup and every 5 minutes
-- **Low latency**: LISTEN/NOTIFY delivers within ~50ms; 30s fallback poll as safety net
-- **Cleanup**: hourly loop deletes delivered rows older than 7 days
+- **Direct write**: poller writes to Postgres immediately, no outbox indirection
+- **At-least-once**: Telegram message_id used for deduplication (ON CONFLICT on inserts)
+- **Media download**: photos/documents downloaded via `getFile` API before processing
+- **Queue drain**: pending messages dispatched after every container completion via `drain_pending()`
 
-**Outbox row lifecycle:** `pending` → `processing` (claimed) → `delivered` | `failed` | back to `pending` (retry)
+## Legacy: Outbox Mode
 
-**Payload types:** `message` (chat messages) and `chat_metadata` (chat name/channel updates)
-
-**Legacy mode** (`use_outbox=false`): Rust polls the `messages` table directly via `message_loop.rs`. The two modes are mutually exclusive.
+When running with Node host (`use_outbox=true`), messages flowed through a durable outbox pipeline. This mode is disabled in Telegram-only mode. See git history for details.
