@@ -89,7 +89,7 @@ next message for group -> re-spawn
   - GroupQueue already passed to process_group_messages — pool_container is accessible
   - Create pool_spawn config in `main.rs` alongside queue setup
 
-- [ ] **2.4** Wire pool into scheduler (`scheduler_wiring.rs`)
+- [x] **2.4** Wire pool into scheduler (`scheduler_wiring.rs`)
   - Scheduled tasks can also use warm containers
   - Modify `run_scheduled_task()` to check group_state.pool_container before spawning
 
@@ -109,14 +109,14 @@ next message for group -> re-spawn
 
 ### Phase 4: Prewarming
 
-- [ ] **4.1** Add prewarming at startup
+- [ ] **4.1** Add prewarming at startup *(deferred — requires container-side "warm start" mode that initializes agent runtime without running a query; current pool_spawn needs a real prompt)*
   - After groups are loaded from Postgres in `main.rs`, iterate registered groups
   - For each group: spawn container via `pool_spawn()` in background task
   - Enforce `max_containers` cap (configurable, default 20) — skip if at limit
   - Log: "Prewarming N containers for N registered groups"
   - Don't block startup — prewarm is best-effort
 
-- [ ] **4.2** Prewarm on group registration
+- [ ] **4.2** Prewarm on group registration *(deferred — same prerequisite as 4.1)*
   - When a new group is registered (via IPC or Telegram), prewarm its container
   - `ipc.rs` group registration handler checks group_state and triggers pool_spawn if cold
 
@@ -128,7 +128,7 @@ next message for group -> re-spawn
   - Next message for that group triggers fresh spawn (automatic via `get_or_spawn`)
   - No polling or docker events needed — foreground model gives instant notification
 
-- [ ] **5.2** Health check liveness probe
+- [x] **5.2** Health check liveness probe
   - Every 5 min: write `{"type":"ping"}` to IPC input, expect container to ACK within 5s
   - If no ACK: mark unhealthy, send SIGTERM to child, wait for exit, set pool_container = None
   - Container side: add ping handler to `drainIpcInput()` (write `{"type":"pong"}` to output)
@@ -162,7 +162,7 @@ next message for group -> re-spawn
   - Test delivery channel: message A output goes to chat A, message B output goes to chat B
   - Test IPC cleanup between container lifetimes (no stale file replay)
 
-- [ ] **7.3** Integration test: warm container message delivery
+- [ ] **7.3** Integration test: warm container message delivery *(deferred — requires running Docker daemon and built container images; manual verification via Telegram)*
   - Spawn a pool container, send message via IPC, verify output arrives via delivery channel
   - Verify idle reaping after timeout
   - Verify prewarm on startup

@@ -11,12 +11,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use intercom_core::{ContainerInput, ContainerOutput, ContainerStatus, NewMessage, PgPool, RegisteredGroup};
+use intercom_core::{ContainerInput, ContainerOutput, ContainerStatus, NewMessage, PgPool, PoolConfig, RegisteredGroup};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 use crate::container::mounts::GroupInfo;
-use crate::container::runner::{RunConfig, run_container_agent, write_snapshots};
+use crate::container::runner::{RunConfig, pool_spawn, run_container_agent, write_snapshots};
 use crate::container::security::ContainerConfig;
 use crate::process_group::resolve_runtime;
 use crate::queue::GroupQueue;
@@ -35,6 +35,7 @@ pub fn build_task_callback(
     telegram: Arc<TelegramBridge>,
     run_config: RunConfig,
     timezone: String,
+    pool_config: PoolConfig,
 ) -> TaskCallback {
     Box::new(move |task: DueTask| {
         let pool = pool.clone();
@@ -44,6 +45,7 @@ pub fn build_task_callback(
         let telegram = telegram.clone();
         let run_config = run_config.clone();
         let timezone = timezone.clone();
+        let pool_config = pool_config.clone();
 
         let task_id = task.id.clone();
         let chat_jid = task.chat_jid.clone();
@@ -55,6 +57,7 @@ pub fn build_task_callback(
             Box::pin(async move {
                 run_scheduled_task(
                     task, &pool, &queue, &groups, &sessions, &telegram, &run_config, &timezone,
+                    &pool_config,
                 )
                 .await;
             })
@@ -77,6 +80,7 @@ async fn run_scheduled_task(
     telegram: &Arc<TelegramBridge>,
     run_config: &RunConfig,
     timezone: &str,
+    pool_config: &PoolConfig,
 ) {
     let start = Instant::now();
     let assistant_name = std::env::var("ASSISTANT_NAME").unwrap_or_else(|_| "Amtiskaw".into());
@@ -112,6 +116,7 @@ async fn run_scheduled_task(
 
     // Clone before assistant_name is moved into ContainerInput
     let assistant_name_cb = assistant_name.clone();
+    let assistant_name_warm = assistant_name.clone();
 
     let input = ContainerInput {
         prompt: task.prompt.clone(),
@@ -242,6 +247,70 @@ async fn run_scheduled_task(
         group = group.name.as_str(),
         "running scheduled task"
     );
+
+    // Try warm container path first (if pool is enabled and container is warm)
+    if pool_config.enabled && queue.has_warm_container(&task.chat_jid).await {
+        info!(task_id = task.id.as_str(), group = group.name.as_str(), "using warm container for scheduled task");
+
+        if let Some(mut delivery_rx) = queue.send_to_warm_container(&task.chat_jid, &task.prompt).await {
+            let sessions_cb = sessions.clone();
+            let pool_cb = pool.clone();
+            let queue_cb = queue.clone();
+            let chat_jid = task.chat_jid.clone();
+            let group_folder = task.group_folder.clone();
+            let task_id_cb = task.id.clone();
+            let assistant_name = assistant_name_warm.clone();
+
+            let mut warm_result: Option<String> = None;
+            let mut warm_error: Option<String> = None;
+
+            while let Some(output) = delivery_rx.recv().await {
+                if let Some(ref sid) = output.new_session_id {
+                    let mut s = sessions_cb.write().await;
+                    s.insert(group_folder.clone(), sid.clone());
+                    if let Err(e) = pool_cb.set_session(&group_folder, sid).await {
+                        warn!(err = %e, "failed to persist session");
+                    }
+                }
+
+                if let Some(ref text) = output.result {
+                    if !text.is_empty() {
+                        let bot_msg = NewMessage {
+                            id: format!("task-{}-{}", task_id_cb, chrono::Utc::now().timestamp_millis()),
+                            chat_jid: chat_jid.clone(),
+                            sender: "bot".into(),
+                            sender_name: assistant_name.clone(),
+                            content: text.clone(),
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            is_from_me: true,
+                            is_bot_message: true,
+                        };
+                        if let Err(e) = pool_cb.store_message(&bot_msg).await {
+                            warn!(err = %e, "failed to persist task output (warm)");
+                        }
+                        if let Err(e) = telegram.send_text_to_jid(&chat_jid, text).await {
+                            error!(err = %e, "failed to send task output via Telegram (warm)");
+                        }
+                        warm_result = Some(text.clone());
+                    }
+                }
+
+                if output.status == ContainerStatus::Error {
+                    warm_error = Some(output.error.clone().unwrap_or_else(|| "Unknown error".into()));
+                }
+
+                if output.status == ContainerStatus::Success && output.result.is_none() {
+                    queue_cb.notify_idle(&chat_jid).await;
+                    break;
+                }
+            }
+
+            log_and_update(pool, &task, start, warm_result.as_deref(), warm_error.as_deref(), timezone).await;
+            return;
+        }
+        // send_to_warm_container returned None — fall through to cold path
+        warn!(task_id = task.id.as_str(), "warm container send failed for scheduled task, falling back");
+    }
 
     let on_spawn: Option<Arc<crate::container::runner::OnSpawnCallback>> = {
         let q = queue.clone();

@@ -190,6 +190,15 @@ pub struct OrchestratorConfig {
     pub idle_timeout_ms: u64,
     /// Folder name for the main group.
     pub main_group_folder: String,
+    /// Maximum session JSONL file size in bytes before auto-reset (default: 512KB).
+    /// When a session file exceeds this, it's deleted before spawning a new container
+    /// to prevent bloated context from causing timeouts.
+    pub session_max_bytes: u64,
+    /// Maximum time in milliseconds to wait for a result frame from the container
+    /// (default: 180_000 = 3 minutes). If the container produces activity (tool calls,
+    /// events) but no final result within this window, it's killed and the session is
+    /// reset for retry.
+    pub result_timeout_ms: u64,
 }
 
 impl Default for OrchestratorConfig {
@@ -201,6 +210,8 @@ impl Default for OrchestratorConfig {
             poll_interval_ms: 1000,
             idle_timeout_ms: 300_000,
             main_group_folder: "main".to_string(),
+            session_max_bytes: 512 * 1024,
+            result_timeout_ms: 180_000,
         }
     }
 }

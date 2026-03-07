@@ -90,6 +90,10 @@ pub struct RunConfig {
     pub timezone: String,
     pub idle_timeout_ms: u64,
     pub allowlist: Option<MountAllowlist>,
+    /// Maximum session JSONL file size in bytes before auto-reset.
+    pub session_max_bytes: u64,
+    /// Maximum time in ms to wait for a result frame before killing the container.
+    pub result_timeout_ms: u64,
 }
 
 impl Default for RunConfig {
@@ -101,6 +105,8 @@ impl Default for RunConfig {
             timezone: "UTC".to_string(),
             idle_timeout_ms: DEFAULT_IDLE_TIMEOUT_MS,
             allowlist: None,
+            session_max_bytes: 512 * 1024,
+            result_timeout_ms: 180_000,
         }
     }
 }
@@ -223,6 +229,8 @@ pub async fn run_container_agent(
     let timeout_duration = Duration::from_millis(timeout_ms);
 
     let (activity_tx, mut activity_rx) = watch::channel(Instant::now());
+    // Result-received signal: set to true when a frame with result.is_some() arrives.
+    let (result_tx, mut result_rx) = watch::channel(false);
     let timed_out = Arc::new(Mutex::new(false));
     let had_streaming_output = Arc::new(Mutex::new(false));
     let new_session_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -233,6 +241,7 @@ pub async fn run_container_agent(
     let timeout_name = name.clone();
     let timeout_flag = timed_out.clone();
     let spawn_time = Instant::now();
+    let result_timeout_duration = Duration::from_millis(config.result_timeout_ms);
     let timeout_handle = tokio::spawn(async move {
         let mut has_received_activity = false;
 
@@ -278,6 +287,35 @@ pub async fn run_container_agent(
                 }
                 break;
             }
+
+            // Result timeout: if we've had activity for result_timeout_duration
+            // but no result frame, the session is likely bloated. Kill container.
+            if has_received_activity
+                && result_timeout_duration.as_millis() > 0
+                && !*result_rx.borrow()
+                && spawn_time.elapsed() >= result_timeout_duration
+            {
+                *timeout_flag.lock().await = true;
+                error!(
+                    container_name = %timeout_name,
+                    elapsed_secs = spawn_time.elapsed().as_secs(),
+                    result_timeout_secs = result_timeout_duration.as_secs(),
+                    "Result timeout — container active but no result frame, stopping (session may need reset)"
+                );
+                let stop_result = Command::new(CONTAINER_RUNTIME_BIN)
+                    .args(["stop", &timeout_name])
+                    .output()
+                    .await;
+                if let Err(e) = stop_result {
+                    warn!(
+                        container_name = %timeout_name,
+                        error = %e,
+                        "Graceful stop failed"
+                    );
+                }
+                break;
+            }
+
             let remaining = effective_timeout - elapsed;
             tokio::select! {
                 _ = tokio::time::sleep(remaining) => {}
@@ -308,6 +346,7 @@ pub async fn run_container_agent(
     let had_output_ref = had_streaming_output.clone();
     let session_ref = new_session_id.clone();
     let activity_tx_ref = activity_tx.clone();
+    let result_tx_ref = result_tx.clone();
 
     loop {
         tokio::select! {
@@ -343,6 +382,9 @@ pub async fn run_container_agent(
                             Ok(parsed) => {
                                 if let Some(ref sid) = parsed.new_session_id {
                                     *session_ref.lock().await = Some(sid.clone());
+                                }
+                                if parsed.result.is_some() {
+                                    result_tx_ref.send(true).ok();
                                 }
                                 *had_output_ref.lock().await = true;
                                 activity_tx_ref.send(Instant::now()).ok();
@@ -401,6 +443,9 @@ pub async fn run_container_agent(
                                     Ok(parsed) => {
                                         if let Some(ref sid) = parsed.new_session_id {
                                             *session_ref.lock().await = Some(sid.clone());
+                                        }
+                                        if parsed.result.is_some() {
+                                            result_tx_ref.send(true).ok();
                                         }
                                         *had_output_ref.lock().await = true;
                                         activity_tx_ref.send(Instant::now()).ok();
@@ -469,6 +514,7 @@ pub async fn run_container_agent(
 
     let was_timed_out = *timed_out.lock().await;
     let had_output = *had_streaming_output.lock().await;
+    let had_result = *result_tx.borrow();
     let session_id = new_session_id.lock().await.clone();
     let exit_code = status.code();
 
@@ -501,7 +547,8 @@ pub async fn run_container_agent(
 
     // Handle timeout cases
     if was_timed_out {
-        if had_output {
+        if had_output && had_result {
+            // Normal idle timeout after producing a result — not an error
             info!(
                 group = %group.name,
                 container_name = %name,
@@ -514,6 +561,48 @@ pub async fn run_container_agent(
                     result: None,
                     new_session_id: session_id,
                     error: None,
+                    model: None,
+                    event: None,
+                },
+                container_name: name,
+                duration,
+            });
+        }
+
+        if had_output && !had_result {
+            // Had activity (tool events) but never produced a result frame.
+            // This usually means the session context is too large — the agent
+            // spent all its time on tool calls replaying history.
+            warn!(
+                group = %group.name,
+                container_name = %name,
+                duration_ms = duration.as_millis(),
+                "Container timed out with activity but no result — session may be bloated"
+            );
+            // Auto-reset session files so the retry starts fresh
+            if let Some(ref sid) = session_id {
+                let session_jsonl = config
+                    .data_dir
+                    .join("sessions")
+                    .join(&group.folder)
+                    .join(".claude/projects/-workspace-group")
+                    .join(format!("{}.jsonl", sid));
+                let session_dir = session_jsonl.parent().unwrap().join(sid);
+                if std::fs::remove_file(&session_jsonl).is_ok() {
+                    info!(
+                        group = %group.name,
+                        session_id = sid.as_str(),
+                        "auto-reset: deleted bloated session JSONL"
+                    );
+                }
+                let _ = std::fs::remove_dir_all(&session_dir);
+            }
+            return Ok(RunResult {
+                output: ContainerOutput {
+                    status: ContainerStatus::Error,
+                    result: None,
+                    new_session_id: None, // Force session clear
+                    error: Some("Result timeout — session auto-reset".to_string()),
                     model: None,
                     event: None,
                 },

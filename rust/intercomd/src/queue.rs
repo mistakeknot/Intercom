@@ -769,6 +769,9 @@ pub async fn run_pool_reaper(
     let check_interval = std::time::Duration::from_secs(60);
     let idle_timeout = std::time::Duration::from_secs(idle_timeout_secs);
 
+    let health_check_interval = 5u32; // Run health check every 5 ticks (5 min)
+    let mut tick_count = 0u32;
+
     info!(idle_timeout_secs, "pool reaper started");
 
     loop {
@@ -803,8 +806,11 @@ pub async fn run_pool_reaper(
             }
         }
 
+        tick_count += 1;
         let containers = queue.warm_containers().await;
-        for (jid, folder, container_name, last_activity) in containers {
+
+        // Idle reaping
+        for (jid, folder, container_name, last_activity) in &containers {
             if last_activity.elapsed() > idle_timeout {
                 info!(
                     container = container_name.as_str(),
@@ -813,8 +819,52 @@ pub async fn run_pool_reaper(
                     "reaping idle warm container"
                 );
                 let data_dir = queue.data_dir().await;
-                write_close_sentinel(&data_dir, &folder);
+                write_close_sentinel(&data_dir, folder);
                 // The exit monitor will handle cleanup when the container exits
+            }
+        }
+
+        // Health check via ping/pong (every health_check_interval ticks)
+        if tick_count % health_check_interval == 0 && !containers.is_empty() {
+            let data_dir = queue.data_dir().await;
+            for (jid, folder, container_name, _) in &containers {
+                let pong_path = data_dir.join("ipc").join(folder).join("pong.json");
+                // Clean up any stale pong from a previous check BEFORE sending ping
+                let _ = std::fs::remove_file(&pong_path);
+
+                // Write ping to IPC input
+                let input_dir = data_dir.join("ipc").join(folder).join("input");
+                let ping_content = serde_json::json!({"type": "ping"});
+                let ping_file = input_dir.join(format!("ping-{}.json", std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()));
+                let _ = std::fs::create_dir_all(&input_dir);
+                let _ = std::fs::write(&ping_file, ping_content.to_string());
+
+                let mut got_pong = false;
+                for _ in 0..10 {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if pong_path.exists() {
+                        let _ = std::fs::remove_file(&pong_path);
+                        got_pong = true;
+                        break;
+                    }
+                }
+
+                if !got_pong {
+                    warn!(
+                        container = container_name.as_str(),
+                        group = folder.as_str(),
+                        "health check failed (no pong within 5s) — stopping container"
+                    );
+                    let _ = tokio::process::Command::new("docker")
+                        .args(["stop", "-t", "5", container_name])
+                        .output()
+                        .await;
+                    queue.purge_stale_ipc(folder).await;
+                    queue.clear_pool_container(jid).await;
+                }
             }
         }
     }

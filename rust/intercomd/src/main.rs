@@ -381,6 +381,8 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
                 allowlist: container::security::load_allowlist(
                     &container::security::default_allowlist_path(),
                 ),
+                session_max_bytes: state.config.orchestrator.session_max_bytes,
+                result_timeout_ms: state.config.orchestrator.result_timeout_ms,
             };
 
             let assistant_name = std::env::var("ASSISTANT_NAME")
@@ -502,6 +504,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
                 state.telegram.clone(),
                 run_config,
                 state.config.scheduler.timezone.clone(),
+                state.config.pool.clone(),
             );
             let sched_pool = pool.clone();
             let sched_shutdown = shutdown_rx.clone();

@@ -164,10 +164,46 @@ async fn process_group_messages(
 
     // 5. Resolve runtime and session
     let runtime = resolve_runtime(&group);
-    let session_id = {
+    let mut session_id = {
         let s = sessions.read().await;
         s.get(&group.folder).cloned()
     };
+
+    // 5a. Session size guard: if the session JSONL exceeds the configured max,
+    // auto-reset to prevent bloated context from causing result timeouts.
+    if let Some(ref sid) = session_id {
+        let session_jsonl = run_config
+            .data_dir
+            .join("sessions")
+            .join(&group.folder)
+            .join(".claude/projects/-workspace-group")
+            .join(format!("{}.jsonl", sid));
+        match std::fs::metadata(&session_jsonl) {
+            Ok(meta) if meta.len() > run_config.session_max_bytes => {
+                warn!(
+                    group = group.name.as_str(),
+                    session_id = sid.as_str(),
+                    file_bytes = meta.len(),
+                    max_bytes = run_config.session_max_bytes,
+                    "session file exceeds size limit — auto-resetting"
+                );
+                // Delete the session JSONL and its directory
+                let session_dir = session_jsonl.parent().unwrap().join(sid);
+                let _ = std::fs::remove_file(&session_jsonl);
+                let _ = std::fs::remove_dir_all(&session_dir);
+                // Clear from memory and Postgres
+                {
+                    let mut s = sessions.write().await;
+                    s.remove(&group.folder);
+                }
+                if let Err(e) = pool.delete_session(&group.folder).await {
+                    warn!(err = %e, "failed to delete session from Postgres");
+                }
+                session_id = None;
+            }
+            _ => {} // File doesn't exist or is under limit — fine
+        }
+    }
 
     let prompt_for_ipc = prompt.clone();
     let input = ContainerInput {
@@ -640,6 +676,27 @@ async fn process_group_messages(
             }
 
             if run_result.output.status == ContainerStatus::Error {
+                // If the error was a result timeout (session bloat), clear
+                // the in-memory session so the retry starts fresh.
+                let is_result_timeout = run_result
+                    .output
+                    .error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("session auto-reset"));
+                if is_result_timeout {
+                    warn!(
+                        group = group.name.as_str(),
+                        "result timeout — clearing session for fresh retry"
+                    );
+                    {
+                        let mut s = sessions.write().await;
+                        s.remove(&group.folder);
+                    }
+                    if let Err(e) = pool.delete_session(&group.folder).await {
+                        warn!(err = %e, "failed to delete session from Postgres after result timeout");
+                    }
+                }
+
                 // Error, but if we already sent output, don't rollback cursor
                 if output_sent.load(std::sync::atomic::Ordering::SeqCst) {
                     warn!(

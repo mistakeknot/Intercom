@@ -130,14 +130,41 @@ pub struct DemarchCommandPlan {
 pub struct DemarchAdapter {
     config: DemarchConfig,
     project_root: PathBuf,
+    /// Root of the Demarch monorepo (where `.beads/` and `.clavain/` live).
+    /// `bd` and `ic` must run from here, not from the intercom subdirectory.
+    monorepo_root: PathBuf,
 }
 
 impl DemarchAdapter {
     pub fn new(config: DemarchConfig, project_root: impl AsRef<Path>) -> Self {
+        let project_root = project_root.as_ref().to_path_buf();
+        let monorepo_root = Self::find_monorepo_root(&project_root);
         Self {
             config,
-            project_root: project_root.as_ref().to_path_buf(),
+            project_root,
+            monorepo_root,
         }
+    }
+
+    /// Walk up from `start` looking for a directory containing `.beads/`.
+    /// Falls back to `start` if not found (standalone mode).
+    fn find_monorepo_root(start: &Path) -> PathBuf {
+        let mut dir = if start.is_absolute() {
+            start.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .unwrap_or_default()
+                .join(start)
+        };
+        loop {
+            if dir.join(".beads").is_dir() {
+                return dir;
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+        start.to_path_buf()
     }
 
     pub fn execute_read(&self, operation: ReadOperation) -> DemarchResponse {
@@ -591,7 +618,7 @@ impl DemarchAdapter {
 
         let mut cmd = Command::new(bin);
         cmd.args(args)
-            .current_dir(&self.project_root)
+            .current_dir(&self.monorepo_root)
             .env("PATH", build_extended_path());
 
         if stdin_data.is_some() {
@@ -685,8 +712,10 @@ impl DemarchAdapter {
 /// (e.g. when intercomd runs as a systemd service with a minimal environment).
 fn is_cli_available(bin: &str) -> bool {
     let extended_path = build_extended_path();
-    Command::new("which")
-        .arg(bin)
+    // Use `command -v` (POSIX) instead of `which` — `which` is not installed
+    // on all systems (e.g., minimal Ubuntu 24.04 images).
+    Command::new("sh")
+        .args(["-c", &format!("command -v {bin}")])
         .env("PATH", &extended_path)
         .output()
         .map(|output| output.status.success())
