@@ -53,6 +53,8 @@ pub struct PoolContainer {
     pub started_at: Instant,
     /// Last time a message was sent to this container (for idle reaping).
     pub last_activity: Instant,
+    /// Whether the container is actively processing a query (can't respond to pings).
+    pub active_delivery: bool,
     /// Background task monitoring child process exit.
     pub exit_monitor: JoinHandle<()>,
     /// Background task reading UDS output frames.
@@ -301,6 +303,10 @@ impl GroupQueue {
             state.idle_waiting = true;
             has_tasks = !state.pending_tasks.is_empty();
             folder = state.group_folder.clone();
+            // Mark pool container as idle (safe for health checks now)
+            if let Some(ref mut pc) = state.pool_container {
+                pc.active_delivery = false;
+            }
         }
         if has_tasks {
             if let Some(ref f) = folder {
@@ -468,9 +474,10 @@ impl GroupQueue {
             return None;
         }
 
-        // Update last activity and create delivery channel
+        // Update last activity, mark as actively processing, and create delivery channel
         let pc = state.pool_container.as_mut().unwrap();
         pc.last_activity = Instant::now();
+        pc.active_delivery = true;
 
         let (tx, rx) = tokio::sync::mpsc::channel(1000);
         pc.delivery_tx = tx;
@@ -495,14 +502,14 @@ impl GroupQueue {
     }
 
     /// Iterate all groups with warm containers for idle reaping.
-    /// Returns (group_jid, group_folder, container_name, last_activity) for each warm container.
-    pub async fn warm_containers(&self) -> Vec<(String, String, String, Instant)> {
+    /// Returns (group_jid, group_folder, container_name, last_activity, active_delivery) for each warm container.
+    pub async fn warm_containers(&self) -> Vec<(String, String, String, Instant, bool)> {
         let inner = self.inner.lock().await;
         inner.groups.iter()
             .filter_map(|(jid, state)| {
                 let pc = state.pool_container.as_ref()?;
                 let folder = state.group_folder.as_ref()?;
-                Some((jid.clone(), folder.clone(), pc.container_name.clone(), pc.last_activity))
+                Some((jid.clone(), folder.clone(), pc.container_name.clone(), pc.last_activity, pc.active_delivery))
             })
             .collect()
     }
@@ -769,7 +776,7 @@ pub async fn run_pool_reaper(
     let check_interval = std::time::Duration::from_secs(60);
     let idle_timeout = std::time::Duration::from_secs(idle_timeout_secs);
 
-    let health_check_interval = 5u32; // Run health check every 5 ticks (5 min)
+    let health_check_interval = 15u32; // Run health check every 15 ticks (15 min)
     let mut tick_count = 0u32;
 
     info!(idle_timeout_secs, "pool reaper started");
@@ -782,7 +789,7 @@ pub async fn run_pool_reaper(
                     info!("pool reaper shutting down");
                     // On shutdown: reap all warm containers
                     let containers = queue.warm_containers().await;
-                    for (jid, folder, container_name, _) in &containers {
+                    for (jid, folder, container_name, _, _) in &containers {
                         info!(container = container_name.as_str(), group = folder.as_str(), "shutdown: stopping warm container");
                         // Write close sentinel so container exits gracefully
                         let data_dir = queue.data_dir().await;
@@ -792,7 +799,7 @@ pub async fn run_pool_reaper(
                     if !containers.is_empty() {
                         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                         // Force-stop any that didn't exit
-                        for (jid, folder, container_name, _) in &containers {
+                        for (jid, folder, container_name, _, _) in &containers {
                             let _ = tokio::process::Command::new("docker")
                                 .args(["stop", "-t", "5", container_name])
                                 .output()
@@ -810,7 +817,7 @@ pub async fn run_pool_reaper(
         let containers = queue.warm_containers().await;
 
         // Idle reaping
-        for (jid, folder, container_name, last_activity) in &containers {
+        for (jid, folder, container_name, last_activity, _) in &containers {
             if last_activity.elapsed() > idle_timeout {
                 info!(
                     container = container_name.as_str(),
@@ -825,9 +832,20 @@ pub async fn run_pool_reaper(
         }
 
         // Health check via ping/pong (every health_check_interval ticks)
+        // Only ping containers that have been idle for at least 2 minutes — active containers
+        // can't respond to pings because drainIpcInput() only runs between queries.
         if tick_count % health_check_interval == 0 && !containers.is_empty() {
             let data_dir = queue.data_dir().await;
-            for (jid, folder, container_name, _) in &containers {
+            for (jid, folder, container_name, _, active_delivery) in &containers {
+                // Skip containers actively processing a query — they can't respond to
+                // pings because drainIpcInput() only runs between queries.
+                if *active_delivery {
+                    info!(
+                        container = container_name.as_str(),
+                        "skipping health check — container is actively processing"
+                    );
+                    continue;
+                }
                 let pong_path = data_dir.join("ipc").join(folder).join("pong.json");
                 // Clean up any stale pong from a previous check BEFORE sending ping
                 let _ = std::fs::remove_file(&pong_path);
@@ -948,6 +966,7 @@ mod tests {
             child: tokio::process::Command::new("true").spawn().unwrap(),
             started_at: Instant::now(),
             last_activity: Instant::now(),
+            active_delivery: false,
             exit_monitor: tokio::spawn(async {}),
             uds_listener: tokio::spawn(async {}),
             delivery_tx: tx,
@@ -972,6 +991,7 @@ mod tests {
             child: tokio::process::Command::new("true").spawn().unwrap(),
             started_at: Instant::now(),
             last_activity: Instant::now(),
+            active_delivery: false,
             exit_monitor: tokio::spawn(async {}),
             uds_listener: tokio::spawn(async {}),
             delivery_tx: tx,
@@ -1006,6 +1026,7 @@ mod tests {
             child: tokio::process::Command::new("true").spawn().unwrap(),
             started_at: Instant::now(),
             last_activity: Instant::now(),
+            active_delivery: false,
             exit_monitor: tokio::spawn(async {}),
             uds_listener: tokio::spawn(async {}),
             delivery_tx: tx,

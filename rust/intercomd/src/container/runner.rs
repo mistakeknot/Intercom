@@ -931,6 +931,7 @@ pub async fn pool_spawn(
         child,
         started_at: now,
         last_activity: now,
+        active_delivery: true, // First message is sent via stdin immediately
         exit_monitor,
         uds_listener: uds_handle,
         delivery_tx,

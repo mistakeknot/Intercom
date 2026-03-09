@@ -299,7 +299,12 @@ async fn run_scheduled_task(
                     warm_error = Some(output.error.clone().unwrap_or_else(|| "Unknown error".into()));
                 }
 
-                if output.status == ContainerStatus::Success && output.result.is_none() {
+                // True idle signal: Success with no result, model, or session.
+                if output.status == ContainerStatus::Success
+                    && output.result.is_none()
+                    && output.model.is_none()
+                    && output.new_session_id.is_none()
+                {
                     queue_cb.notify_idle(&chat_jid).await;
                     break;
                 }

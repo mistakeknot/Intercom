@@ -333,8 +333,12 @@ async fn process_group_messages(
                     }
                 }
 
-                // Container signals idle — this message is done
-                if output.status == ContainerStatus::Success && output.result.is_none() {
+                // True idle signal: Success with no result, model, or session.
+                if output.status == ContainerStatus::Success
+                    && output.result.is_none()
+                    && output.model.is_none()
+                    && output.new_session_id.is_none()
+                {
                     queue_cb.notify_idle(&chat_jid_owned).await;
                     break;
                 }
@@ -423,8 +427,36 @@ async fn process_group_messages(
                 let exit_name = container_name.clone();
                 pc.exit_monitor.abort(); // Cancel the placeholder
                 pc.exit_monitor = tokio::spawn(async move {
-                    // Wait for child process to exit — this blocks until the container dies
-                    // Note: child is moved into PoolContainer, so we monitor via docker wait
+                    // Wait for Docker to register the container name before calling `docker wait`.
+                    // `docker run --name X` spawns the process but the name may not be visible
+                    // to `docker wait` until the container is fully created. Without this,
+                    // `docker wait` returns immediately with an empty exit code (race condition).
+                    let mut ready = false;
+                    for attempt in 0..10 {
+                        let inspect = tokio::process::Command::new("docker")
+                            .args(["inspect", "--format", "{{.State.Running}}", &exit_name])
+                            .output()
+                            .await;
+                        if let Ok(out) = inspect {
+                            let status = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                            if status == "true" {
+                                ready = true;
+                                break;
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        if attempt > 0 {
+                            debug!(container = %exit_name, attempt, "waiting for container to be ready for docker wait");
+                        }
+                    }
+                    if !ready {
+                        warn!(container = %exit_name, "container never became ready — skipping docker wait");
+                        exit_queue.purge_stale_ipc(&exit_folder).await;
+                        exit_queue.clear_pool_container(&exit_jid).await;
+                        return;
+                    }
+
+                    // Now safe to call docker wait — container is confirmed running
                     let result = tokio::process::Command::new("docker")
                         .args(["wait", &exit_name])
                         .output()
@@ -487,8 +519,14 @@ async fn process_group_messages(
                         }
                     }
 
-                    // Container signals idle — first message done, container stays warm
-                    if output.status == ContainerStatus::Success && output.result.is_none() {
+                    // Container signals idle — first message done, container stays warm.
+                    // The idle signal is a Success frame with no result, no model, and no session.
+                    // Model announcements have `model` set; session updates have `new_session_id`.
+                    if output.status == ContainerStatus::Success
+                        && output.result.is_none()
+                        && output.model.is_none()
+                        && output.new_session_id.is_none()
+                    {
                         queue_cb.notify_idle(&chat_jid_owned).await;
                         break;
                     }
