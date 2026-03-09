@@ -723,20 +723,26 @@ fn is_cli_available(bin: &str) -> bool {
 }
 
 /// Build an extended PATH that includes common user-local bin directories.
-/// Appends ~/.local/bin, ~/.cargo/bin, and /usr/local/bin to the existing PATH.
+/// Prepends ~/.local/bin and ~/.cargo/bin so user-installed versions take
+/// precedence over stale system-wide copies (e.g. /usr/local/bin/bd v0.50
+/// vs ~/.local/bin/bd v0.58).
 fn build_extended_path() -> String {
     let base = std::env::var("PATH").unwrap_or_default();
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    let extra_dirs = [
+    let prepend_dirs = [
         format!("{home}/.local/bin"),
         format!("{home}/.cargo/bin"),
-        "/usr/local/bin".to_string(),
     ];
-    let mut parts: Vec<&str> = base.split(':').collect();
-    for dir in &extra_dirs {
-        if !parts.contains(&dir.as_str()) {
-            parts.push(dir);
+    let has_usr_local = base.split(':').any(|p| p == "/usr/local/bin");
+    let mut parts: Vec<String> = Vec::new();
+    for dir in &prepend_dirs {
+        if !base.split(':').any(|p| p == dir.as_str()) {
+            parts.push(dir.clone());
         }
+    }
+    parts.push(base);
+    if !has_usr_local {
+        parts.push("/usr/local/bin".to_string());
     }
     parts.join(":")
 }
