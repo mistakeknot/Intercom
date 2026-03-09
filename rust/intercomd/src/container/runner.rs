@@ -385,6 +385,13 @@ pub async fn run_container_agent(
                                 }
                                 if parsed.result.is_some() {
                                     result_tx_ref.send(true).ok();
+                                    // One-shot container: write _close sentinel so the
+                                    // container exits its IPC wait loop after delivering
+                                    // the result.  Pool containers use pool_spawn() and
+                                    // never reach this code path.
+                                    let close_dir = ipc_dir.join("input");
+                                    let _ = tokio::fs::create_dir_all(&close_dir).await;
+                                    let _ = tokio::fs::write(close_dir.join("_close"), "").await;
                                 }
                                 *had_output_ref.lock().await = true;
                                 activity_tx_ref.send(Instant::now()).ok();
