@@ -216,6 +216,7 @@ async fn process_group_messages(
         assistant_name: Some(assistant_name.to_string()),
         model: group.model.clone(),
         secrets: None, // Secrets injected by runner from env files
+        previous_context: None,
     };
 
     let group_info = GroupInfo {

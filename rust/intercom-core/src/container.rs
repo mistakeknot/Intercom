@@ -36,6 +36,9 @@ pub struct ContainerInput {
     /// Zeroed from memory after writing to the container process.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secrets: Option<HashMap<String, String>>,
+    /// Optional context from previous session, injected by host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_context: Option<String>,
 }
 
 /// Output payload extracted from container stdout between OUTPUT markers.
@@ -160,6 +163,7 @@ mod tests {
             assistant_name: Some("Amtiskaw".to_string()),
             model: None,
             secrets: None,
+            previous_context: None,
         };
         let json = serde_json::to_string(&input).unwrap();
         assert!(json.contains("\"chatJid\""));
@@ -169,6 +173,8 @@ mod tests {
         // Optional None fields should be absent
         assert!(!json.contains("\"model\""));
         assert!(!json.contains("\"secrets\""));
+        // previous_context: None should be absent
+        assert!(!json.contains("\"previousContext\""));
     }
 
     #[test]

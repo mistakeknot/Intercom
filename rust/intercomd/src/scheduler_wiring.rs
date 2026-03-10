@@ -128,6 +128,7 @@ async fn run_scheduled_task(
         assistant_name: Some(assistant_name),
         model: group.model.clone(),
         secrets: None,
+        previous_context: None,
     };
 
     let group_info = GroupInfo {

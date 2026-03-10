@@ -19,6 +19,7 @@ export interface ContainerInput {
   assistantName?: string;
   model?: string;
   secrets?: Record<string, string>;
+  previousContext?: string;
 }
 
 export interface StreamEvent {
