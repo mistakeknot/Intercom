@@ -25,6 +25,7 @@ import {
   closeUdsOutput,
   log,
 } from '../../shared/protocol.js';
+import { writeHandoffNote, readHandoffNote, reconstructAmbientContext, formatResumeContext, HandoffNote } from './handoff.js';
 
 interface SessionEntry {
   sessionId: string;
@@ -158,6 +159,41 @@ function createPreCompactHook(assistantName?: string): HookCallback {
       fs.writeFileSync(filePath, markdown);
 
       log(`Archived conversation to ${filePath}`);
+
+      // Write handoff note for session resumption
+      try {
+        const handoffNote: HandoffNote = {
+          version: 1,
+          created_at: new Date().toISOString(),
+          source: 'agent',
+          session_id: preCompact.session_id || 'unknown',
+          task: {
+            summary: summary || 'Session compacted — no summary available',
+          },
+          decisions: [],
+          pending: [],
+          gotchas: [],
+        };
+
+        // Extract last few assistant messages as context
+        const assistantMessages = messages
+          .filter(m => m.role === 'assistant')
+          .slice(-3)
+          .map(m => {
+            const text = typeof m.content === 'string' ? m.content : '';
+            return text.slice(0, 200);
+          })
+          .filter(t => t.length > 0);
+
+        if (assistantMessages.length > 0) {
+          handoffNote.pending = [`Recent context: ${assistantMessages[assistantMessages.length - 1]}`];
+        }
+
+        writeHandoffNote('/workspace/group', handoffNote);
+        log('Wrote handoff note for session resumption');
+      } catch (handoffErr) {
+        log(`Failed to write handoff note: ${handoffErr instanceof Error ? handoffErr.message : String(handoffErr)}`);
+      }
     } catch (err) {
       log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -348,6 +384,7 @@ async function runQuery(
   containerInput: ContainerInput,
   sdkEnv: Record<string, string | undefined>,
   resumeAt?: string,
+  resumeContext?: string,
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
   const stream = new MessageStream();
   stream.push(prompt);
@@ -383,6 +420,13 @@ async function runQuery(
   let globalClaudeMd: string | undefined;
   if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
     globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
+  }
+
+  // Append resume context from previous session
+  if (resumeContext) {
+    globalClaudeMd = globalClaudeMd
+      ? `${globalClaudeMd}\n\n${resumeContext}`
+      : resumeContext;
   }
 
   // Discover additional directories mounted at /workspace/extra/*
@@ -554,6 +598,27 @@ async function main(): Promise<void> {
     prompt += '\n' + pending.join('\n');
   }
 
+  // Read previous session context for resumption.
+  // Gate on handoff note existence, not sessionId — a host-resumed session
+  // (with sessionId set) still needs context about what the previous session decided.
+  let resumeContext: string | undefined;
+  if (containerInput.previousContext) {
+    // Host-provided context takes priority
+    resumeContext = containerInput.previousContext;
+    log('Using host-provided previousContext');
+  } else {
+    const handoff = readHandoffNote('/workspace/group');
+    if (handoff) {
+      resumeContext = formatResumeContext(handoff);
+      log('Using handoff note for session resumption');
+    } else if (!sessionId) {
+      // Only reconstruct from ambient state for truly new sessions (no SDK resume).
+      // Resumed sessions already have conversation history.
+      resumeContext = reconstructAmbientContext('/workspace/group');
+      log('Using reconstructed ambient context (no handoff note)');
+    }
+  }
+
   // Announce model to host
   writeOutput({ status: 'success', result: null, model: CLAUDE_MODEL });
 
@@ -563,7 +628,8 @@ async function main(): Promise<void> {
     while (true) {
       log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
 
-      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
+      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt, resumeContext);
+      resumeContext = undefined; // consumed — only inject on the first query
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
       }
