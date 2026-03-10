@@ -77,6 +77,13 @@ pub enum IpcTask {
         trigger: String,
         timestamp: Option<String>,
     },
+    /// Request a graceful restart of the intercomd daemon.
+    /// Main group only. Daemon sends itself SIGTERM; systemd auto-restarts.
+    RestartService {
+        /// Optional reason for audit trail.
+        reason: Option<String>,
+        timestamp: Option<String>,
+    },
 }
 
 fn default_context_mode() -> String {

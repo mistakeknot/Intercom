@@ -12,8 +12,9 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use intercom_core::{
     DemarchAdapter, IpcGroupContext, IpcMessage, IpcQuery, IpcQueryResponse, IpcTask,
@@ -22,6 +23,8 @@ use intercom_core::{
 use tracing::{debug, error, info, warn};
 
 const MAIN_GROUP_FOLDER: &str = "main";
+/// Minimum interval between restart_service requests (seconds).
+const RESTART_RATE_LIMIT_SECS: u64 = 60;
 
 /// Configuration for the IPC watcher.
 #[derive(Debug, Clone)]
@@ -241,6 +244,8 @@ pub struct IpcWatcher {
     demarch: Arc<DemarchAdapter>,
     delegate: Arc<dyn IpcDelegate>,
     registry: GroupRegistry,
+    /// Epoch-seconds of last restart_service request (rate limiting).
+    last_restart_epoch: AtomicU64,
 }
 
 impl IpcWatcher {
@@ -263,6 +268,7 @@ impl IpcWatcher {
             demarch,
             delegate,
             registry,
+            last_restart_epoch: AtomicU64::new(0),
         }
     }
 
@@ -394,8 +400,14 @@ impl IpcWatcher {
             match read_and_parse::<IpcTask>(&file_path) {
                 Ok(task) => {
                     if self.authorize_task(&task, ctx) {
-                        self.delegate
-                            .forward_task(&task, &ctx.group_folder, ctx.is_main);
+                        // RestartService is handled directly by the daemon —
+                        // not forwarded to Node.
+                        if let IpcTask::RestartService { ref reason, .. } = task {
+                            self.handle_restart_service(reason.as_deref(), ctx);
+                        } else {
+                            self.delegate
+                                .forward_task(&task, &ctx.group_folder, ctx.is_main);
+                        }
                     }
                     remove_file(&file_path);
                 }
@@ -410,7 +422,9 @@ impl IpcWatcher {
     /// Check if a task is authorized for the source group.
     fn authorize_task(&self, task: &IpcTask, ctx: &IpcGroupContext) -> bool {
         match task {
-            IpcTask::RegisterGroup { .. } | IpcTask::RefreshGroups { .. } => {
+            IpcTask::RegisterGroup { .. }
+            | IpcTask::RefreshGroups { .. }
+            | IpcTask::RestartService { .. } => {
                 if !ctx.is_main {
                     warn!(
                         source_group = ctx.group_folder.as_str(),
@@ -455,6 +469,38 @@ impl IpcWatcher {
             IpcTask::PauseTask { .. }
             | IpcTask::ResumeTask { .. }
             | IpcTask::CancelTask { .. } => true,
+        }
+    }
+
+    /// Handle a restart_service request: rate-limit, log, and SIGTERM self.
+    /// Systemd (or equivalent) is expected to restart the daemon automatically.
+    fn handle_restart_service(&self, reason: Option<&str>, ctx: &IpcGroupContext) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let last = self.last_restart_epoch.load(Ordering::Relaxed);
+
+        if now.saturating_sub(last) < RESTART_RATE_LIMIT_SECS {
+            warn!(
+                group = %ctx.group_folder,
+                rate_limit_secs = RESTART_RATE_LIMIT_SECS,
+                "restart_service rate-limited — ignoring"
+            );
+            return;
+        }
+
+        self.last_restart_epoch.store(now, Ordering::Relaxed);
+        info!(
+            group = %ctx.group_folder,
+            reason = reason.unwrap_or("none"),
+            "restart_service requested — sending SIGTERM to self"
+        );
+
+        // Send SIGTERM to our own process. The existing graceful shutdown handler
+        // will drain the queue, and systemd will restart us.
+        unsafe {
+            libc::kill(libc::getpid(), libc::SIGTERM);
         }
     }
 

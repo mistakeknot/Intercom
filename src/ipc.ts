@@ -485,6 +485,22 @@ export async function processTaskIpc(
       }
       break;
 
+    case 'restart_service':
+      // Only main group can request a restart
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized restart_service attempt blocked',
+        );
+        break;
+      }
+      logger.info(
+        { sourceGroup, reason: (data as Record<string, unknown>).reason },
+        'restart_service requested via IPC — sending SIGTERM to self',
+      );
+      process.kill(process.pid, 'SIGTERM');
+      break;
+
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
   }

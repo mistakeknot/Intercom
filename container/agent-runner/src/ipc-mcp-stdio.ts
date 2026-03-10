@@ -281,6 +281,38 @@ Use available_groups.json to find the JID for a group. The folder name should be
   },
 );
 
+server.tool(
+  'restart_service',
+  `Request a graceful restart of the Intercom daemon. Main group only.
+
+Use this after making code changes to intercom's source to reload the service. The daemon sends itself SIGTERM and systemd auto-restarts it. Rate-limited to once per 60 seconds.
+
+NOTE: This will terminate your current container session. Send any final messages via send_message before calling this.`,
+  {
+    reason: z.string().optional().describe('Reason for restart (for audit trail, e.g., "applied code changes to ipc.rs")'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'Only the main group can restart the service.' }],
+        isError: true,
+      };
+    }
+
+    const data = {
+      type: 'restart_service',
+      reason: args.reason || undefined,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [{ type: 'text' as const, text: 'Restart requested. The daemon will gracefully shut down and systemd will restart it. Your current session will end.' }],
+    };
+  },
+);
+
 // --- Demarch IPC Query Bridge ---
 
 const QUERIES_DIR = path.join(IPC_DIR, 'queries');

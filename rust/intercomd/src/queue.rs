@@ -776,8 +776,8 @@ pub async fn run_pool_reaper(
     let check_interval = std::time::Duration::from_secs(60);
     let idle_timeout = std::time::Duration::from_secs(idle_timeout_secs);
 
-    let health_check_interval = 15u32; // Run health check every 15 ticks (15 min)
-    let mut tick_count = 0u32;
+    let health_check_interval = 5u32; // Run health check every 5 ticks (5 min)
+    let mut tick_count = 1u32; // Start at 1 so first tick doesn't trigger health check
 
     info!(idle_timeout_secs, "pool reaper started");
 
@@ -871,17 +871,33 @@ pub async fn run_pool_reaper(
                 }
 
                 if !got_pong {
-                    warn!(
-                        container = container_name.as_str(),
-                        group = folder.as_str(),
-                        "health check failed (no pong within 5s) — stopping container"
-                    );
-                    let _ = tokio::process::Command::new("docker")
-                        .args(["stop", "-t", "5", container_name])
-                        .output()
-                        .await;
-                    queue.purge_stale_ipc(folder).await;
-                    queue.clear_pool_container(jid).await;
+                    // Re-check live state: a message may have arrived during the 5s wait,
+                    // making the container busy (can't respond to pings while running a query).
+                    let still_idle = {
+                        let live_containers = queue.warm_containers().await;
+                        live_containers.iter()
+                            .find(|(j, _, _, _, _)| j == jid)
+                            .map(|(_, _, _, _, active)| !active)
+                            .unwrap_or(false) // container gone = don't kill
+                    };
+                    if still_idle {
+                        warn!(
+                            container = container_name.as_str(),
+                            group = folder.as_str(),
+                            "health check failed (no pong within 5s) — stopping container"
+                        );
+                        let _ = tokio::process::Command::new("docker")
+                            .args(["stop", "-t", "5", container_name])
+                            .output()
+                            .await;
+                        queue.purge_stale_ipc(folder).await;
+                        queue.clear_pool_container(jid).await;
+                    } else {
+                        info!(
+                            container = container_name.as_str(),
+                            "health check: no pong, but container became active — skipping kill"
+                        );
+                    }
                 }
             }
         }

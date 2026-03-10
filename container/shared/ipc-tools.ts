@@ -135,6 +135,20 @@ export function cancelTask(ctx: IpcContext, taskId: string): string {
   return `Task ${taskId} cancellation requested.`;
 }
 
+export function restartService(ctx: IpcContext, reason?: string): string {
+  if (!ctx.isMain) {
+    return 'Only the main group can restart the service.';
+  }
+
+  writeIpcFile(TASKS_DIR, {
+    type: 'restart_service',
+    reason: reason || undefined,
+    timestamp: new Date().toISOString(),
+  });
+
+  return 'Restart requested. The daemon will gracefully shut down and systemd will restart it.';
+}
+
 export function registerGroup(
   ctx: IpcContext,
   jid: string,

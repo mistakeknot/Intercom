@@ -208,8 +208,13 @@ async fn run_scheduled_task(
                     *error_cb.write().await = Some(err_msg);
                 }
 
-                // Notify queue on completion
-                if output.status == ContainerStatus::Success {
+                // Notify queue on completion — only on true idle signal
+                // (not model announcements or session updates)
+                if output.status == ContainerStatus::Success
+                    && output.result.is_none()
+                    && output.model.is_none()
+                    && output.new_session_id.is_none()
+                {
                     queue.notify_idle(&chat_jid).await;
                 }
             })
