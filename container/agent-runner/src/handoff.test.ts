@@ -104,23 +104,41 @@ describe('handoff', () => {
       expect(readHandoffNote(tmpDir)).toBeNull();
     });
 
-    it('returns null for malformed JSON', () => {
+    it('consumes malformed JSON as .invalid', () => {
       fs.writeFileSync(path.join(tmpDir, 'handoff.json'), '{bad json');
       expect(readHandoffNote(tmpDir)).toBeNull();
+      expect(fs.existsSync(path.join(tmpDir, 'handoff.json'))).toBe(false);
+      expect(fs.existsSync(path.join(tmpDir, 'handoff.json.invalid'))).toBe(true);
     });
 
-    it('returns null for wrong version', () => {
+    it('consumes wrong version as .invalid', () => {
       fs.writeFileSync(path.join(tmpDir, 'handoff.json'), JSON.stringify({
         version: 2, task: { summary: 'test' }, decisions: [], pending: [], gotchas: [],
       }));
       expect(readHandoffNote(tmpDir)).toBeNull();
+      expect(fs.existsSync(path.join(tmpDir, 'handoff.json'))).toBe(false);
+      expect(fs.existsSync(path.join(tmpDir, 'handoff.json.invalid'))).toBe(true);
     });
 
-    it('returns null when decisions is not an array', () => {
+    it('consumes invalid schema as .invalid', () => {
       fs.writeFileSync(path.join(tmpDir, 'handoff.json'), JSON.stringify({
         version: 1, task: { summary: 'test' }, decisions: 'not array', pending: [], gotchas: [],
       }));
       expect(readHandoffNote(tmpDir)).toBeNull();
+      expect(fs.existsSync(path.join(tmpDir, 'handoff.json.invalid'))).toBe(true);
+    });
+
+    it('sanitizes bead_id on read', () => {
+      const note = {
+        version: 1, created_at: '', source: 'agent', session_id: 's',
+        task: { bead_id: 'Demarch-4wm\nEvil injection', summary: 'test' },
+        decisions: [], pending: [], gotchas: [],
+      };
+      fs.writeFileSync(path.join(tmpDir, 'handoff.json'), JSON.stringify(note));
+      const result = readHandoffNote(tmpDir);
+      expect(result).not.toBeNull();
+      expect(result!.task.bead_id).toBe('Demarch-4wm');
+      expect(result!.task.bead_id).not.toContain('\n');
     });
   });
 

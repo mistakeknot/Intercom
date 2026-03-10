@@ -20,9 +20,9 @@ export interface HandoffNote {
   gotchas: string[];
 }
 
-/** Sanitize a string for safe markdown list rendering. */
+/** Sanitize a string for safe markdown list rendering. Strips control chars and markdown. */
 function sanitize(s: string): string {
-  return s.replace(/[\n\r`]/g, ' ').slice(0, MAX_ELEMENT_LENGTH);
+  return s.replace(/[\n\r`<>]/g, ' ').replace(/^#+\s/, '').slice(0, MAX_ELEMENT_LENGTH);
 }
 
 /**
@@ -47,26 +47,50 @@ export function writeHandoffNote(groupDir: string, note: HandoffNote): void {
  */
 export function readHandoffNote(groupDir: string): HandoffNote | null {
   const filePath = path.join(groupDir, 'handoff.json');
+  let content: string;
   try {
-    const content = fs.readFileSync(filePath, 'utf-8');
-    const parsed = JSON.parse(content);
+    content = fs.readFileSync(filePath, 'utf-8');
+  } catch {
+    return null; // file doesn't exist
+  }
 
-    // Strict schema validation
-    if (parsed.version !== 1) return null;
-    if (!parsed.task || typeof parsed.task.summary !== 'string') return null;
-    if (!Array.isArray(parsed.decisions) || !Array.isArray(parsed.pending) || !Array.isArray(parsed.gotchas)) return null;
-
-    // Cap summary length
-    parsed.task.summary = parsed.task.summary.slice(0, 500);
-
-    // Consume: rename to .consumed so it's not re-read on next restart
-    try { fs.renameSync(filePath, `${filePath}.consumed`); } catch { /* ignore */ }
-
-    return parsed as HandoffNote;
+  // Consume the file immediately after reading — even if validation fails.
+  // This prevents malformed files from blocking the handoff path indefinitely.
+  let parsed: any;
+  try {
+    parsed = JSON.parse(content);
   } catch (err) {
-    log(`Failed to read handoff.json: ${err instanceof Error ? err.message : String(err)}`);
+    log(`Malformed handoff.json, consuming as invalid: ${err instanceof Error ? err.message : String(err)}`);
+    try { fs.renameSync(filePath, `${filePath}.invalid`); } catch { /* ignore */ }
     return null;
   }
+
+  // Strict schema validation — consume as invalid on failure
+  if (parsed.version !== 1 || !parsed.task || typeof parsed.task.summary !== 'string'
+    || !Array.isArray(parsed.decisions) || !Array.isArray(parsed.pending) || !Array.isArray(parsed.gotchas)) {
+    log('handoff.json failed schema validation, consuming as invalid');
+    try { fs.renameSync(filePath, `${filePath}.invalid`); } catch { /* ignore */ }
+    return null;
+  }
+
+  // Cap and sanitize all string fields on read
+  parsed.task.summary = sanitize(parsed.task.summary);
+  if (parsed.task.bead_id) {
+    // Bead IDs follow pattern: Prefix-code (e.g., Demarch-4wm). Truncate at first
+    // character that doesn't belong to strip injected content after a valid prefix.
+    const beadMatch = String(parsed.task.bead_id).match(/^[A-Za-z]+-[a-z0-9]+/);
+    parsed.task.bead_id = beadMatch ? beadMatch[0] : undefined;
+  }
+  parsed.decisions = parsed.decisions.map((s: unknown) => sanitize(String(s)));
+  parsed.pending = parsed.pending.map((s: unknown) => sanitize(String(s)));
+  parsed.gotchas = parsed.gotchas.map((s: unknown) => sanitize(String(s)));
+
+  // Consume: rename to .consumed so it's not re-read on next restart
+  try { fs.renameSync(filePath, `${filePath}.consumed`); } catch {
+    log('Warning: failed to rename handoff.json to .consumed');
+  }
+
+  return parsed as HandoffNote;
 }
 
 /**
@@ -110,9 +134,9 @@ export function formatResumeContext(note: HandoffNote): string {
     '',
   ];
 
-  // Task
+  // Task — bead_id sanitized at read time, but defense-in-depth here too
   const taskLabel = note.task.bead_id
-    ? `[${note.task.bead_id}] ${sanitize(note.task.summary)}`
+    ? `[${sanitize(note.task.bead_id)}] ${sanitize(note.task.summary)}`
     : sanitize(note.task.summary);
   lines.push(`**Task:** ${taskLabel}`);
 

@@ -25,7 +25,9 @@ import {
   closeUdsOutput,
   log,
 } from '../../shared/protocol.js';
-import { writeHandoffNote, readHandoffNote, reconstructAmbientContext, formatResumeContext, HandoffNote } from './handoff.js';
+import { writeHandoffNote, readHandoffNote, reconstructAmbientContext, formatResumeContext, HandoffNote, HANDOFF_MAX_CHARS } from './handoff.js';
+
+const GROUP_DIR = '/workspace/group';
 
 interface SessionEntry {
   sessionId: string;
@@ -180,7 +182,11 @@ function createPreCompactHook(assistantName?: string): HookCallback {
           .filter(m => m.role === 'assistant')
           .slice(-3)
           .map(m => {
-            const text = typeof m.content === 'string' ? m.content : '';
+            const text = typeof m.content === 'string'
+              ? m.content
+              : Array.isArray(m.content)
+                ? m.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join(' ')
+                : '';
             return text.slice(0, 200);
           })
           .filter(t => t.length > 0);
@@ -189,7 +195,7 @@ function createPreCompactHook(assistantName?: string): HookCallback {
           handoffNote.pending = [`Recent context: ${assistantMessages[assistantMessages.length - 1]}`];
         }
 
-        writeHandoffNote('/workspace/group', handoffNote);
+        writeHandoffNote(GROUP_DIR, handoffNote);
         log('Wrote handoff note for session resumption');
       } catch (handoffErr) {
         log(`Failed to write handoff note: ${handoffErr instanceof Error ? handoffErr.message : String(handoffErr)}`);
@@ -603,18 +609,18 @@ async function main(): Promise<void> {
   // (with sessionId set) still needs context about what the previous session decided.
   let resumeContext: string | undefined;
   if (containerInput.previousContext) {
-    // Host-provided context takes priority
-    resumeContext = containerInput.previousContext;
+    // Host-provided context takes priority, but cap size for safety
+    resumeContext = containerInput.previousContext.slice(0, HANDOFF_MAX_CHARS);
     log('Using host-provided previousContext');
   } else {
-    const handoff = readHandoffNote('/workspace/group');
+    const handoff = readHandoffNote(GROUP_DIR);
     if (handoff) {
       resumeContext = formatResumeContext(handoff);
       log('Using handoff note for session resumption');
     } else if (!sessionId) {
       // Only reconstruct from ambient state for truly new sessions (no SDK resume).
       // Resumed sessions already have conversation history.
-      resumeContext = reconstructAmbientContext('/workspace/group');
+      resumeContext = reconstructAmbientContext(GROUP_DIR);
       log('Using reconstructed ambient context (no handoff note)');
     }
   }
