@@ -1,0 +1,80 @@
+version: 1
+mode: dependency-driven
+tier: deep
+max_parallel: 3
+timeout_per_task: 600
+
+stages:
+  - name: "Spikes (pre-requisites)"
+    tasks:
+      - id: spike-a
+        title: "Telegram library evaluation"
+        files: []
+        depends: []
+        tier: fast
+      - id: spike-b
+        title: "MCP transport verification"
+        files: []
+        depends: []
+        tier: fast
+      - id: spike-c
+        title: "Skaffen import path"
+        files: []
+        depends: []
+        tier: fast
+
+  - name: "Foundation"
+    tasks:
+      - id: task-1
+        title: "Go project scaffold + config"
+        files: [go/go.mod, go/cmd/intercomd/main.go, go/internal/config/config.go]
+        depends: []
+      - id: task-2
+        title: "Postgres layer"
+        files: [go/internal/db/pool.go, go/internal/db/schema.go, go/internal/db/messages.go, go/internal/db/groups.go, go/internal/db/sessions.go, go/internal/db/outbox.go]
+        depends: [task-1]
+      - id: task-3
+        title: "Telegram bot"
+        files: [go/internal/telegram/bot.go, go/internal/telegram/commands.go, go/internal/telegram/delivery.go]
+        depends: [task-1, spike-a]
+
+  - name: "Smoke test"
+    tasks:
+      - id: task-4
+        title: "End-to-end smoke stub"
+        files: [go/cmd/intercomd/main.go, go/internal/smoke/smoke_test.go]
+        depends: [task-2, task-3]
+        tier: fast
+
+  - name: "Core runtime"
+    tasks:
+      - id: task-5
+        title: "Go MCP server"
+        files: [go/internal/mcp/server.go, go/internal/mcp/tools_intercom.go, go/internal/mcp/tools_demarch.go]
+        depends: [task-2, spike-b]
+      - id: task-6
+        title: "Subprocess manager"
+        files: [go/internal/subprocess/manager.go, go/internal/subprocess/process.go]
+        depends: [task-5]
+      - id: task-7
+        title: "Skaffen router integration"
+        files: [go/internal/routing/adapter.go, go/internal/routing/evidence.go]
+        depends: [task-1, spike-c]
+
+  - name: "Queue and scheduling"
+    tasks:
+      - id: task-8
+        title: "Message queue + outbox"
+        files: [go/internal/queue/queue.go]
+        depends: [task-2, task-6]
+      - id: task-9
+        title: "Scheduler"
+        files: [go/internal/scheduler/scheduler.go]
+        depends: [task-8]
+
+  - name: "Integration"
+    tasks:
+      - id: task-10
+        title: "Final integration + wiring"
+        files: [go/cmd/intercomd/main.go]
+        depends: [task-3, task-6, task-7, task-8, task-9]
