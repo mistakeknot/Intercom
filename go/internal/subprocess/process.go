@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,6 +24,14 @@ type Process struct {
 	err     error
 	mu      sync.Mutex
 	started time.Time
+
+	// Result timeout tracking — mirrors Rust's result_timeout_ms behavior.
+	// If the process produces activity but no "result" frame within this
+	// duration, it's killed and the session should be reset.
+	resultTimeout  time.Duration
+	hasActivity    atomic.Bool
+	hasResult      atomic.Bool
+	timedOutResult atomic.Bool // true if killed due to result timeout
 }
 
 // Frame is a single JSON-lines output frame from the agent.
@@ -34,15 +43,16 @@ type Frame struct {
 
 // StartConfig configures a subprocess launch.
 type StartConfig struct {
-	Runtime    string           // "claude", "gemini", "codex"
-	Model      string           // e.g. "claude-opus-4-6"
-	WorkDir    string           // working directory for the agent
-	Prompt     string           // initial prompt
-	SessionDir string           // session JSONL directory
-	MCPConfig  string           // path to MCP config JSON (explicit)
-	MCPServer  *MCPServerConfig // auto-generate MCP config from intercomd binary
-	Env        []string         // additional env vars
-	Args       []string         // additional CLI args
+	Runtime         string           // "claude", "gemini", "codex"
+	Model           string           // e.g. "claude-opus-4-6"
+	WorkDir         string           // working directory for the agent
+	Prompt          string           // initial prompt
+	SessionDir      string           // session JSONL directory
+	MCPConfig       string           // path to MCP config JSON (explicit)
+	MCPServer       *MCPServerConfig // auto-generate MCP config from intercomd binary
+	Env             []string         // additional env vars
+	Args            []string         // additional CLI args
+	ResultTimeoutMs int              // max ms to wait for result frame (0 = disabled)
 }
 
 // Start launches an agent subprocess.
@@ -104,12 +114,13 @@ func Start(ctx context.Context, cfg StartConfig) (*Process, error) {
 	}
 
 	p := &Process{
-		cmd:     cmd,
-		stdin:   stdin,
-		stdout:  stdout,
-		stderr:  stderr,
-		done:    make(chan struct{}),
-		started: time.Now(),
+		cmd:           cmd,
+		stdin:         stdin,
+		stdout:        stdout,
+		stderr:        stderr,
+		done:          make(chan struct{}),
+		started:       time.Now(),
+		resultTimeout: time.Duration(cfg.ResultTimeoutMs) * time.Millisecond,
 	}
 
 	// Wait in background, clean up temp MCP config on exit
@@ -120,6 +131,11 @@ func Start(ctx context.Context, cfg StartConfig) (*Process, error) {
 		}
 		close(p.done)
 	}()
+
+	// Start result timeout watchdog if configured
+	if p.resultTimeout > 0 {
+		go p.resultTimeoutWatchdog()
+	}
 
 	return p, nil
 }
@@ -146,9 +162,15 @@ func (p *Process) ReadFrames(ctx context.Context, handler func(Frame)) error {
 		if err := json.Unmarshal(line, &frame); err != nil {
 			slog.Debug("non-JSON stdout line", "line", string(line))
 			// Treat non-JSON as text content
-			handler(Frame{Type: "text", Content: string(line)})
-			continue
+			frame = Frame{Type: "text", Content: string(line)}
 		}
+
+		// Track activity and result frames for timeout watchdog
+		p.MarkActivity()
+		if frame.Type == "result" {
+			p.MarkResult()
+		}
+
 		handler(frame)
 	}
 	return scanner.Err()
@@ -167,7 +189,7 @@ func (p *Process) CloseStdin() error {
 
 // Kill terminates the subprocess.
 func (p *Process) Kill() error {
-	if p.cmd.Process != nil {
+	if p.cmd != nil && p.cmd.Process != nil {
 		return p.cmd.Process.Kill()
 	}
 	return nil
@@ -193,6 +215,44 @@ func (p *Process) Duration() time.Duration {
 func (p *Process) DrainStderr() string {
 	data, _ := io.ReadAll(p.stderr)
 	return string(data)
+}
+
+// MarkActivity records that the process produced non-result output.
+func (p *Process) MarkActivity() {
+	p.hasActivity.Store(true)
+}
+
+// MarkResult records that a result frame was received.
+func (p *Process) MarkResult() {
+	p.hasResult.Store(true)
+}
+
+// TimedOutResult returns true if the process was killed due to result timeout.
+// When true, the caller should clear the session for a fresh retry.
+func (p *Process) TimedOutResult() bool {
+	return p.timedOutResult.Load()
+}
+
+// resultTimeoutWatchdog kills the process if it has activity but no result
+// frame within the configured timeout. Mirrors Rust's result timeout behavior
+// in container/runner.rs.
+func (p *Process) resultTimeoutWatchdog() {
+	timer := time.NewTimer(p.resultTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-p.done:
+		return
+	case <-timer.C:
+		if p.hasActivity.Load() && !p.hasResult.Load() {
+			p.timedOutResult.Store(true)
+			slog.Error("result timeout — process active but no result frame, killing",
+				"elapsed", time.Since(p.started).Round(time.Second),
+				"result_timeout", p.resultTimeout,
+			)
+			p.Kill()
+		}
+	}
 }
 
 func buildArgs(cfg StartConfig) ([]string, error) {

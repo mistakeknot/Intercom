@@ -8,11 +8,23 @@ import (
 	"time"
 )
 
-// Manager tracks active subprocess slots and enforces concurrency limits.
+// Manager tracks active subprocess slots, enforces concurrency limits,
+// and manages per-group session files with auto-reset on overflow.
 type Manager struct {
 	maxConcurrent int
 	mu            sync.Mutex
 	active        map[string]*Process // keyed by group folder
+
+	// Sessions tracks per-group session IDs and their JSONL files.
+	// Nil if session management is disabled.
+	Sessions *SessionTracker
+}
+
+// ManagerConfig holds configuration for creating a Manager.
+type ManagerConfig struct {
+	MaxConcurrent   int
+	DataDir         string // root data dir for session files
+	SessionMaxBytes int64  // max JSONL file size before auto-reset (0 = no limit)
 }
 
 func NewManager(maxConcurrent int) *Manager {
@@ -20,6 +32,49 @@ func NewManager(maxConcurrent int) *Manager {
 		maxConcurrent: maxConcurrent,
 		active:        make(map[string]*Process),
 	}
+}
+
+// NewManagerWithSessions creates a Manager with session file tracking enabled.
+func NewManagerWithSessions(cfg ManagerConfig) *Manager {
+	m := &Manager{
+		maxConcurrent: cfg.MaxConcurrent,
+		active:        make(map[string]*Process),
+	}
+	if cfg.DataDir != "" && cfg.SessionMaxBytes > 0 {
+		m.Sessions = NewSessionTracker(cfg.DataDir, cfg.SessionMaxBytes)
+	}
+	return m
+}
+
+// PreDispatchSessionCheck runs the session size guard before spawning a subprocess.
+// Returns true if the session was reset (caller should start fresh).
+func (m *Manager) PreDispatchSessionCheck(ctx context.Context, groupFolder string, store SessionStore) (bool, error) {
+	if m.Sessions == nil {
+		return false, nil
+	}
+	return m.Sessions.CheckAndReset(ctx, groupFolder, store)
+}
+
+// PostDispatchSessionUpdate handles session tracking after a subprocess completes.
+// If the process timed out waiting for a result, clears the session for retry.
+// If a new session ID was produced, persists it.
+func (m *Manager) PostDispatchSessionUpdate(ctx context.Context, groupFolder string, proc *Process, newSessionID string, store SessionStore) error {
+	if m.Sessions == nil {
+		return nil
+	}
+
+	// Result timeout → clear session for fresh retry
+	if proc.TimedOutResult() {
+		slog.Warn("result timeout — clearing session for fresh retry", "group", groupFolder)
+		return m.Sessions.ClearSession(ctx, groupFolder, store)
+	}
+
+	// Persist new session ID if provided
+	if newSessionID != "" {
+		return m.Sessions.PersistSession(ctx, groupFolder, newSessionID, store)
+	}
+
+	return nil
 }
 
 // Acquire reserves a slot for a group. Returns error if at capacity or group already running.
