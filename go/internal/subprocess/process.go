@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -33,20 +34,37 @@ type Frame struct {
 
 // StartConfig configures a subprocess launch.
 type StartConfig struct {
-	Runtime    string   // "claude", "gemini", "codex"
-	Model      string   // e.g. "claude-opus-4-6"
-	WorkDir    string   // working directory for the agent
-	Prompt     string   // initial prompt
-	SessionDir string   // session JSONL directory
-	MCPConfig  string   // path to MCP config JSON
-	Env        []string // additional env vars
-	Args       []string // additional CLI args
+	Runtime    string           // "claude", "gemini", "codex"
+	Model      string           // e.g. "claude-opus-4-6"
+	WorkDir    string           // working directory for the agent
+	Prompt     string           // initial prompt
+	SessionDir string           // session JSONL directory
+	MCPConfig  string           // path to MCP config JSON (explicit)
+	MCPServer  *MCPServerConfig // auto-generate MCP config from intercomd binary
+	Env        []string         // additional env vars
+	Args       []string         // additional CLI args
 }
 
 // Start launches an agent subprocess.
+// If MCPServer is set and MCPConfig is empty, auto-generates a temp mcp.json
+// and cleans it up when the process exits.
 func Start(ctx context.Context, cfg StartConfig) (*Process, error) {
+	// Auto-generate MCP config if needed
+	var tempMCPFile string
+	if cfg.MCPConfig == "" && cfg.MCPServer != nil && cfg.MCPServer.IntercomdBinary != "" {
+		path, err := WriteMCPConfig(*cfg.MCPServer)
+		if err != nil {
+			return nil, fmt.Errorf("generate mcp config: %w", err)
+		}
+		cfg.MCPConfig = path
+		tempMCPFile = path
+	}
+
 	args, err := buildArgs(cfg)
 	if err != nil {
+		if tempMCPFile != "" {
+			os.Remove(tempMCPFile)
+		}
 		return nil, err
 	}
 
@@ -58,18 +76,30 @@ func Start(ctx context.Context, cfg StartConfig) (*Process, error) {
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		if tempMCPFile != "" {
+			os.Remove(tempMCPFile)
+		}
 		return nil, fmt.Errorf("stdin pipe: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		if tempMCPFile != "" {
+			os.Remove(tempMCPFile)
+		}
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
+		if tempMCPFile != "" {
+			os.Remove(tempMCPFile)
+		}
 		return nil, fmt.Errorf("stderr pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
+		if tempMCPFile != "" {
+			os.Remove(tempMCPFile)
+		}
 		return nil, fmt.Errorf("start %s: %w", args[0], err)
 	}
 
@@ -82,9 +112,12 @@ func Start(ctx context.Context, cfg StartConfig) (*Process, error) {
 		started: time.Now(),
 	}
 
-	// Wait in background
+	// Wait in background, clean up temp MCP config on exit
 	go func() {
 		p.err = cmd.Wait()
+		if tempMCPFile != "" {
+			os.Remove(tempMCPFile)
+		}
 		close(p.done)
 	}()
 

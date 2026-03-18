@@ -80,9 +80,15 @@ func serveCmd(configPath *string) *cobra.Command {
 			// --- Subprocess manager ---
 			mgr := subprocess.NewManager(cfg.Orchestrator.MaxConcurrentContainers)
 
+			// --- MCP server config for agent subprocesses ---
+			mcpCfg := &subprocess.MCPServerConfig{
+				IntercomdBinary: subprocess.ResolveIntercomdBinary(),
+				ConfigPath:      *configPath,
+			}
+
 			// --- Message queue ---
 			msgQueue := queue.New(func(ctx context.Context, chatJID string) bool {
-				return processGroupMessages(ctx, chatJID, cfg, pool, messenger, router, mgr)
+				return processGroupMessages(ctx, chatJID, cfg, pool, messenger, router, mgr, mcpCfg)
 			})
 
 			// --- HTTP server ---
@@ -154,7 +160,7 @@ func serveCmd(configPath *string) *cobra.Command {
 			// Scheduler
 			if cfg.Scheduler.Enabled && pool != nil {
 				sched := scheduler.New(pool, func(ctx context.Context, task db.ScheduledTask) (string, error) {
-					return executeScheduledTask(ctx, task, cfg, pool, messenger, router, mgr)
+					return executeScheduledTask(ctx, task, cfg, pool, messenger, router, mgr, mcpCfg)
 				}, cfg.Scheduler.PollIntervalMs)
 				wg.Add(1)
 				go func() {
@@ -356,7 +362,7 @@ func handleTelegramCallback(ctx context.Context, cb telegram.Callback, cfg *conf
 	}
 }
 
-func processGroupMessages(ctx context.Context, chatJID string, cfg *config.Config, pool *db.Pool, messenger *telegram.Messenger, router routing.Router, mgr *subprocess.Manager) bool {
+func processGroupMessages(ctx context.Context, chatJID string, cfg *config.Config, pool *db.Pool, messenger *telegram.Messenger, router routing.Router, mgr *subprocess.Manager, mcpCfg *subprocess.MCPServerConfig) bool {
 	if pool == nil {
 		return false
 	}
@@ -406,12 +412,13 @@ func processGroupMessages(ctx context.Context, chatJID string, cfg *config.Confi
 	conversation, _ := pool.GetRecentConversation(ctx, chatJID, 20)
 	prompt := formatPrompt(conversation)
 
-	// Start agent subprocess
+	// Start agent subprocess with MCP tools
 	proc, err := subprocess.Start(ctx, subprocess.StartConfig{
-		Runtime: runtime,
-		Model:   model,
-		WorkDir: fmt.Sprintf("%s/%s", cfg.Storage.GroupsDir, group.Folder),
-		Prompt:  prompt,
+		Runtime:   runtime,
+		Model:     model,
+		WorkDir:   fmt.Sprintf("%s/%s", cfg.Storage.GroupsDir, group.Folder),
+		Prompt:    prompt,
+		MCPServer: mcpCfg,
 	})
 	if err != nil {
 		slog.Error("start subprocess", "err", err, "group", group.Folder)
@@ -452,17 +459,18 @@ func processGroupMessages(ctx context.Context, chatJID string, cfg *config.Confi
 	return true
 }
 
-func executeScheduledTask(ctx context.Context, task db.ScheduledTask, cfg *config.Config, pool *db.Pool, messenger *telegram.Messenger, router routing.Router, mgr *subprocess.Manager) (string, error) {
+func executeScheduledTask(ctx context.Context, task db.ScheduledTask, cfg *config.Config, pool *db.Pool, messenger *telegram.Messenger, router routing.Router, mgr *subprocess.Manager, mcpCfg *subprocess.MCPServerConfig) (string, error) {
 	model, runtime, err := router.SelectModel(ctx, "scheduled")
 	if err != nil {
 		return "", err
 	}
 
 	proc, err := subprocess.Start(ctx, subprocess.StartConfig{
-		Runtime: runtime,
-		Model:   model,
-		WorkDir: fmt.Sprintf("%s/%s", cfg.Storage.GroupsDir, task.GroupFolder),
-		Prompt:  task.Prompt,
+		Runtime:   runtime,
+		Model:     model,
+		WorkDir:   fmt.Sprintf("%s/%s", cfg.Storage.GroupsDir, task.GroupFolder),
+		Prompt:    task.Prompt,
+		MCPServer: mcpCfg,
 	})
 	if err != nil {
 		return "", err
