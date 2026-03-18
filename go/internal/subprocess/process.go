@@ -53,6 +53,11 @@ type StartConfig struct {
 	Env             []string         // additional env vars
 	Args            []string         // additional CLI args
 	ResultTimeoutMs int              // max ms to wait for result frame (0 = disabled)
+
+	// UseContainer enables Docker container execution instead of bare CLI spawning.
+	// When true, the agent runs inside a Docker container (intercom-agent:latest)
+	// with volume mounts, secret injection, and UDS output streaming.
+	UseContainer bool
 }
 
 // Start launches an agent subprocess.
