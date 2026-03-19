@@ -31,7 +31,7 @@ Telegram API
 
 **Telegram-Only Mode**: Auto-detected when `TELEGRAM_BOT_TOKEN` is set and `TelegramBridge` is enabled. The poller writes directly to Postgres and enqueues messages for processing — no outbox indirection needed. `TelegramDelegate` in `ipc.rs` sends messages directly via `TelegramBridge` (no HTTP to Node). Registry sync, outbox drain, and message_loop are all skipped.
 
-**Container Output**: Containers prefer Unix domain sockets (UDS) for output when available, falling back to stdout `OUTPUT_START/END` markers for backward compatibility. The host binds a `UnixListener` at `{data_dir}/ipc/{group}/output.sock` before spawning each container. The container connects and sends length-prefixed frames (4-byte big-endian length + JSON payload, max 4 MiB). UDS eliminates marker-splitting bugs from partial reads, embedded newlines, and large output truncation. Protocol implementation: `container/shared/protocol.ts` (client), `rust/intercomd/src/container/runner.rs` (server).
+**Container Output**: Containers prefer Unix domain sockets (UDS) for output when available, falling back to stdout `OUTPUT_START/END` markers for backward compatibility. The host binds a `UnixListener` at `{data_dir}/ipc/{group}/output.sock` before spawning each container. The container connects and sends length-prefixed frames (4-byte big-endian length + JSON payload, max 4 MiB). UDS eliminates marker-splitting bugs from partial reads, embedded newlines, and large output truncation. Protocol implementation: `container/shared/protocol.ts` (client), `rust/intercomd/src/container/runner.rs` (Rust server), `go/internal/container/runner.go` (Go server).
 
 ## Architecture Reference
 
@@ -42,6 +42,60 @@ Telegram API
 | Crate structure, config, CLI, HTTP API, background loops | [IronClaw (Rust Daemon)](docs/architecture/ironclaw.md) |
 | Host/Rust/Container file tables | [File Reference](docs/architecture/file-reference.md) |
 | Container isolation, secrets, mount validation, allowlists | [Security Model](docs/architecture/security.md) |
+
+## Go Rewrite (in progress)
+
+The daemon is being rewritten from Rust to Go (`go/`). Motivation: Demarch's stack is overwhelmingly Go — Skaffen, Clavain, Intercore, masaq. In Go, cross-pillar integrations become direct function calls instead of subprocess bridges.
+
+### Go Package Structure
+
+```
+go/
+├── cmd/intercomd/main.go          # CLI + Axum-equivalent HTTP server
+└── internal/
+    ├── config/                    # TOML config with env overrides
+    ├── container/                 # Docker container execution (NEW)
+    │   ├── protocol.go            #   ContainerInput/Output types, OUTPUT markers, RuntimeKind
+    │   ├── mounts.go              #   Volume mount builder, GroupInfo, ContainerName()
+    │   ├── secrets.go             #   .env parsing, Claude OAuth, Docker arg construction
+    │   ├── security.go            #   MountAllowlist, blocked patterns, path validation
+    │   └── runner.go              #   RunContainerAgent(), UDS streaming, timeout watchdog
+    ├── db/                        # Postgres (pgx): groups, messages, outbox, LISTEN/NOTIFY
+    ├── mcp/                       # MCP server for custom tools
+    ├── outbox/                    # Outbox drain loop with LISTEN/NOTIFY
+    ├── queue/                     # Message queue + delivery
+    ├── routing/                   # Skaffen router integration
+    ├── scheduler/                 # Cron/interval/one-shot scheduling
+    ├── smoke/                     # End-to-end smoke tests
+    ├── subprocess/                # CLI agent subprocess manager
+    │   ├── process.go             #   Process lifecycle, result timeout watchdog
+    │   ├── manager.go             #   Concurrency limits, session tracking
+    │   ├── session.go             #   Per-group session files, auto-reset
+    │   └── mcpconfig.go           #   Auto-generated MCP config
+    └── telegram/                  # Telegram bot (poller, commands, delivery)
+```
+
+### Container Package (`go/internal/container/`)
+
+Full port of the Rust `container/` module. Manages Docker container lifecycle for agent runtimes.
+
+| File | Purpose |
+|------|---------|
+| `protocol.go` | Wire types: `ContainerInput`, `ContainerOutput`, `StreamEvent`, `VolumeMount`. `ExtractOutputMarkers()` for stdout fallback parsing. `ContainerImage()` / `RunnerContainerPath()` for runtime→image mapping. |
+| `mounts.go` | `BuildVolumeMounts()` — constructs bind mounts per group. Main groups get project root (ro) + group dir (rw). Claude runtime gets `.claude/` sessions with auto-created settings. All groups get IPC namespace and runner source mounts. |
+| `secrets.go` | `ReadSecrets()` — reads `.env` + Claude OAuth credentials. `BuildContainerArgs()` / `BuildPoolContainerArgs()` — constructs `docker run` CLI with `-v`, `--user`, `--mount tmpfs` for excluded dirs. |
+| `security.go` | `MountAllowlist` from `~/.config/intercom/mount-allowlist.json`. `ValidateMount()` checks: hard-blocked roots, blocked patterns (`.ssh`, `.env`, etc.), allowed root containment, path traversal, read-only enforcement for non-main groups. |
+| `runner.go` | `RunContainerAgent()` — spawns Docker, writes JSON to stdin, streams output via UDS (length-prefixed frames) or stdout markers. Two-phase timeout watchdog: startup (30s) then activity-based. `EnsureRuntimeAvailable()`, `CleanupOrphans()`, `StopContainer()`. |
+
+**Integration**: `subprocess.StartConfig` has a `UseContainer bool` field. When true, callers route through `container.RunContainerAgent()` instead of `subprocess.Start()`.
+
+### Go Build & Test
+
+```bash
+cd go && go build ./...             # Build all packages
+cd go && go test ./...              # Run all tests (34 container + others)
+cd go && go test ./internal/container/ -v  # Container package tests only
+```
 
 ## Service Management
 
