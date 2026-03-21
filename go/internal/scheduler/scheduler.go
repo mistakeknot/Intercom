@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/mistakeknot/intercom/internal/db"
+	"github.com/robfig/cron/v3"
 )
 
 // TaskRunner is called to execute a scheduled task. Returns the result text.
@@ -106,9 +107,13 @@ func computeNextRun(scheduleType, scheduleValue string) string {
 		}
 		return time.Now().Add(d).UTC().Format(time.RFC3339Nano)
 	case "cron":
-		// TODO: add cron parsing library
-		// For now, schedule 24h from now as placeholder
-		return time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339Nano)
+		parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+		sched, err := parser.Parse(scheduleValue)
+		if err != nil {
+			slog.Warn("invalid cron expression", "value", scheduleValue, "err", err)
+			return ""
+		}
+		return sched.Next(time.Now()).UTC().Format(time.RFC3339Nano)
 	default:
 		return "" // one-shot task, no next run
 	}
