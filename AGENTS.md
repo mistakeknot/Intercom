@@ -99,13 +99,19 @@ Canonical message-passing surface. Anchors on the A2A protocol per [`docs/canon/
 |------|---------|
 | `transport.go` | The `Transport` interface (`Name`, `Send`, `Subscribe`, `Health`) plus canonical types: `InboundMessage`, `OutboundMessage`, `Part` (text/file/data), `PartKind`, `Health`. |
 | `transport_test.go` | Compile-time interface assertion via `mockTransport`; PartKind string-table tests; zero-value safety tests. |
+| `a2a/types.go` | A2A wire types: `Message`, `Part` (text/file/data), `SendMessageRequest`/`Response`, `Task`/`TaskStatus`/`TaskState`, `Artifact`, `AgentCard`, `AgentCapabilities`, `AgentSkill`, `SecurityScheme`, `OAuth2Flow`. |
+| `a2a/translate.go` | A2A `Message` ↔ canonical `InboundMessage`/`OutboundMessage`. Recognizes `Metadata["sylveste.senderUri"]`; passes through metadata as `WireMetadata["a2a.meta.*"]`. |
+| `a2a/server.go` | `Server` (implements `Transport`): HTTP handlers for `GET /.well-known/agent.json` and `POST /messages`. Streaming + task endpoints return 501 with pointer to sub-beads. Backpressure delivered via blocking channel send under request context. |
+| `a2a/server_test.go` | Round-trip POST /messages → inbound channel + 202 Task reply; Agent Card endpoint; missing-messageId rejection; transport.Transport compile-time assertion; outbound-not-implemented sentinel. |
+| `a2a/idgen.go` | Monotonic message-ID generator (`a2a-<unix-nanos>-<counter>`). |
 
 **Implementation status (2026-05-23):**
-- Interface defined and tested. `go test ./internal/transport/` passes.
-- Concrete implementations land via separate beads:
+- Interface defined and tested. `go test ./internal/transport/...` passes (9/9 tests).
+- A2A native transport: v1 inbound + Agent Card landed under `sylveste-ewy3.4.1`.
+- Streaming, task store, outbound client, OAuth2 land as sub-beads under `sylveste-ewy3.4.1.{1,2,3,4}`.
+- Concrete implementations for adjacent wires land via separate beads:
   - `transport/telegram/` — migrate from `internal/telegram/` (bead `sylveste-benl.7`)
   - `transport/signal/` — new (bead `sylveste-benl.6`)
-  - `transport/a2a/` — native A2A endpoint (bead to be filed under `sylveste-ewy3.4` follow-up)
 
 **Contract for implementers:**
 
