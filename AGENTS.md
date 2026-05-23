@@ -72,7 +72,9 @@ go/
     │   ├── manager.go             #   Concurrency limits, session tracking
     │   ├── session.go             #   Per-group session files, auto-reset
     │   └── mcpconfig.go           #   Auto-generated MCP config
-    └── telegram/                  # Telegram bot (poller, commands, delivery)
+    ├── telegram/                  # Telegram bot (poller, commands, delivery) [migrating to transport/telegram/]
+    └── transport/                 # Canonical message-passing surface (A2A-shaped)
+        └── transport.go           #   Transport interface + InboundMessage/OutboundMessage/Part types
 ```
 
 ### Container Package (`go/internal/container/`)
@@ -88,6 +90,35 @@ Full port of the Rust `container/` module. Manages Docker container lifecycle fo
 | `runner.go` | `RunContainerAgent()` — spawns Docker, writes JSON to stdin, streams output via UDS (length-prefixed frames) or stdout markers. Two-phase timeout watchdog: startup (30s) then activity-based. `EnsureRuntimeAvailable()`, `CleanupOrphans()`, `StopContainer()`. |
 
 **Integration**: `subprocess.StartConfig` has a `UseContainer bool` field. When true, callers route through `container.RunContainerAgent()` instead of `subprocess.Start()`.
+
+### Transport Package (`go/internal/transport/`)
+
+Canonical message-passing surface. Anchors on the A2A protocol per [`docs/canon/intercom-transport-target.md`](../../docs/canon/intercom-transport-target.md) — A2A is the native internal form; telegram and signal are wire adapters that translate to/from A2A `Message` / `Task` shapes.
+
+| File | Purpose |
+|------|---------|
+| `transport.go` | The `Transport` interface (`Name`, `Send`, `Subscribe`, `Health`) plus canonical types: `InboundMessage`, `OutboundMessage`, `Part` (text/file/data), `PartKind`, `Health`. |
+| `transport_test.go` | Compile-time interface assertion via `mockTransport`; PartKind string-table tests; zero-value safety tests. |
+
+**Implementation status (2026-05-23):**
+- Interface defined and tested. `go test ./internal/transport/` passes.
+- Concrete implementations land via separate beads:
+  - `transport/telegram/` — migrate from `internal/telegram/` (bead `sylveste-benl.7`)
+  - `transport/signal/` — new (bead `sylveste-benl.6`)
+  - `transport/a2a/` — native A2A endpoint (bead to be filed under `sylveste-ewy3.4` follow-up)
+
+**Contract for implementers:**
+
+1. **Inbound translation:** wire-specific events become `InboundMessage` with `TransportName` set, `SenderURI` in canonical scheme (`telegram:<user_id>`, `signal:<e164>`, `sylveste://agent/<name>`), `Parts` filled from media type (text/file/data), `WireMetadata` carrying transport-specific round-trip fields (e.g. telegram `chat_id` / `message_id`). The routing layer never reads `WireMetadata` — it passes through opaquely.
+2. **Outbound translation:** consume `OutboundMessage`, write to wire. Recognize hint keys in `WireMetadata` (e.g. `reply_to_msg_id`); ignore unknown keys without error.
+3. **Backpressure:** do not buffer more than ~100 messages on the `Subscribe` channel. Deliver backpressure to the wire (pause polling, etc.).
+4. **Concurrency:** `Send` MUST be safe for concurrent calls. `Subscribe` is called once per process lifecycle.
+5. **Health:** must be cheap; the `/health` HTTP endpoint and SessionStart hooks call it frequently.
+
+**Sprint↔Task adapter** (per intercom-transport-target.md §Sylveste-sprint↔A2A-Task adapter):
+- `InboundMessage.ContextID` / `OutboundMessage.ContextID` = bead ID (durable conversation thread).
+- `OutboundMessage.TaskID` = A2A runtime task handle (per-run, ephemeral).
+- The scheduler keys work by both: runtime by TaskID, durable by ContextID.
 
 ### Go Build & Test
 
