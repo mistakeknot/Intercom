@@ -102,17 +102,20 @@ Canonical message-passing surface. Anchors on the A2A protocol per [`docs/canon/
 | `a2a/types.go` | A2A wire types: `Message`, `Part` (text/file/data), `SendMessageRequest`/`Response`, `ListTasksResponse`, `Task`/`TaskStatus`/`TaskState`, `Artifact`, `AgentCard`, `AgentCapabilities`, `AgentSkill`, `SecurityScheme`, `OAuth2Flow`. |
 | `a2a/translate.go` | A2A `Message` ↔ canonical `InboundMessage`/`OutboundMessage`. Recognizes `Metadata["sylveste.senderUri"]`; passes through metadata as `WireMetadata["a2a.meta.*"]`. |
 | `a2a/store.go` | `Store` — in-memory Task store with cursor pagination, terminal-state guard, RW-lock concurrency. v2 lands a Dolt-backed variant behind the same interface. |
-| `a2a/server.go` | `Server` (implements `Transport`): HTTP handlers using Go 1.22+ method-aware patterns. Routes: `GET /.well-known/agent.json`, `POST /messages` (creates+stores Task), `POST /messages:stream` (501), `GET /tasks` (List w/ pagination), `GET /tasks/{id}` (Get; `:subscribe` suffix→501), `POST /tasks/{id}:cancel` (Cancel). Backpressure via blocking channel send under request context. |
-| `a2a/server_test.go` | Full lifecycle round-trip: POST /messages → list → get → cancel → re-cancel-409 → subscribe-501. Plus Agent Card, missing-messageId, invalid-limit, transport.Transport assertion. |
+| `a2a/server.go` | `Server` (implements `Transport`): HTTP handlers using Go 1.22+ method-aware patterns. Routes: `GET /.well-known/agent.json`, `POST /messages` (creates+stores Task), `POST /messages:stream` (SSE), `GET /tasks` (List w/ pagination), `GET /tasks/{id}` (Get; `:subscribe` suffix→SSE), `POST /tasks/{id}:cancel` (Cancel). Backpressure via blocking channel send under request context. |
+| `a2a/broker.go` | `Broker` fans out per-task SSE events. Buffered subscriber channels, non-blocking `Publish` (best-effort), `PublishFinal` closes all subscribers + marks task terminated so late subscribers get a closed channel. |
+| `a2a/stream.go` | SSE handlers for `POST /messages:stream` and `GET /tasks/{id}:subscribe`. Wire format `event: <kind>\ndata: <json>\n\n`. Backfills current status on subscribe; emits terminal-state event with `Final: true`. |
+| `a2a/server_test.go` | Full lifecycle round-trip: POST /messages → list → get → cancel → re-cancel-409 → subscribe (200, text/event-stream). Plus Agent Card, missing-messageId, invalid-limit, transport.Transport assertion. |
 | `a2a/store_test.go` | Store unit tests: create+get, state transitions, terminal-state guard, cancel (active + terminal + unknown), cursor pagination across multiple pages, limit clamping, empty/unknown cursor, concurrent Len. Plus `splitTaskIDSuffix` parser. |
+| `a2a/stream_test.go` | SSE behavior: stream emits SUBMITTED→WORKING→COMPLETED on POST /messages:stream; backfill-then-stream on /tasks/{id}:subscribe; terminal-task backfill emits final-and-closes; client cancel cleans up broker subscriber. Plus broker unit tests (subscribe/unsubscribe, PublishFinal closes, slow-subscriber drop). |
 | `a2a/idgen.go` | Monotonic ID generators: `generateMessageID` (`a2a-<nanos>-<n>`) and `generateTaskID` (`task-<nanos>-<n>`). Distinct prefixes keep grep/diagnosis trivial. |
 
-**Implementation status (2026-05-23):**
-- Interface defined and tested. `go test ./internal/transport/...` passes (22/22 tests).
+**Implementation status (2026-05-24):**
+- Interface defined and tested. `go test ./internal/transport/...` passes (32/32 tests).
 - A2A native transport: v1 inbound + Agent Card landed under `sylveste-ewy3.4.1`.
 - A2A Task store + GET/POST `/tasks` endpoints landed under `sylveste-ewy3.4.1.2`.
+- A2A SSE streaming (POST /messages:stream, GET /tasks/{id}:subscribe) landed under `sylveste-ewy3.4.1.1`. `AgentCard.Capabilities.Streaming` is auto-set to true by `New()`.
 - Remaining sub-beads under `sylveste-ewy3.4.1`:
-  - `.1` SSE streaming (POST /messages:stream, GET /tasks/{id}:subscribe)
   - `.3` Outbound A2A client (replaces `ErrOutboundNotImplemented`)
   - `.4` OAuth2 Resource Indicators enforcement (depends on Gridfire-v1)
 - Concrete implementations for adjacent wires land via separate beads:

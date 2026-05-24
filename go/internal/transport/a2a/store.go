@@ -25,13 +25,36 @@ type Store struct {
 	mu    sync.RWMutex
 	tasks map[string]*Task
 	order []string // insertion order; cursor pagination walks this index
+
+	publisher Publisher // nil disables event publishing; set via SetPublisher
 }
 
-// NewStore returns an empty in-memory Task store.
+// Publisher is the broker side of the store→SSE event flow. The store calls
+// Publish on each non-terminal status transition and PublishFinal on each
+// terminal transition. The handler subscribes to the broker independently.
+//
+// The interface lets tests inject a recording publisher and lets the v2
+// Dolt-backed store reuse the same Broker by satisfying this interface.
+type Publisher interface {
+	Publish(taskID string, evt StreamEvent)
+	PublishFinal(taskID string, evt StreamEvent)
+}
+
+// NewStore returns an empty in-memory Task store. Call [Store.SetPublisher]
+// to wire it to a broker for SSE streaming.
 func NewStore() *Store {
 	return &Store{
 		tasks: make(map[string]*Task),
 	}
+}
+
+// SetPublisher wires the store to a Publisher (typically [Broker]). Calling
+// with nil disables publishing. Idempotent and safe at any time, but in
+// practice it is called once at construction time in [New].
+func (s *Store) SetPublisher(p Publisher) {
+	s.mu.Lock()
+	s.publisher = p
+	s.mu.Unlock()
 }
 
 // ErrTaskNotFound is returned when an ID is unknown to the store.
@@ -128,19 +151,43 @@ func (s *Store) List(cursor string, limit int) (tasks []Task, nextCursor string)
 // Terminal-state guard: A2A treats COMPLETED, CANCELLED, FAILED, and
 // REJECTED as terminal; once a task reaches one of these it cannot move
 // (the next interaction needs a new task). The store enforces this.
+//
+// When a publisher is wired (via SetPublisher), a TaskStatusUpdateEvent is
+// emitted on every successful transition. Final=true on terminal transitions.
 func (s *Store) UpdateStatus(id string, newState TaskState) (Task, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	t, ok := s.tasks[id]
 	if !ok {
+		s.mu.Unlock()
 		return Task{}, ErrTaskNotFound
 	}
 	if isTerminalState(t.Status.State) {
+		s.mu.Unlock()
 		return Task{}, ErrTaskTerminal
 	}
 	t.Status.State = newState
 	t.Status.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
-	return *t, nil
+	updated := *t
+	pub := s.publisher
+	s.mu.Unlock()
+
+	if pub != nil {
+		evt := StreamEvent{
+			Kind: StreamEventStatus,
+			Status: &TaskStatusUpdateEvent{
+				TaskID:    updated.ID,
+				ContextID: updated.ContextID,
+				Status:    updated.Status,
+				Final:     isTerminalState(updated.Status.State),
+			},
+		}
+		if evt.Status.Final {
+			pub.PublishFinal(updated.ID, evt)
+		} else {
+			pub.Publish(updated.ID, evt)
+		}
+	}
+	return updated, nil
 }
 
 // Cancel transitions a non-terminal task to TASK_STATE_CANCELLED. Returns

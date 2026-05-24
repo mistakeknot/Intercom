@@ -90,6 +90,53 @@ type ListTasksResponse struct {
 	NextCursor string `json:"nextCursor,omitempty"`
 }
 
+// StreamEventKind discriminates the three SSE event variants the streaming
+// endpoints emit. The wire `event:` field carries the canonical kind name.
+type StreamEventKind string
+
+const (
+	// StreamEventStatus is a TaskStatusUpdateEvent — most events on the wire.
+	StreamEventStatus StreamEventKind = "TaskStatusUpdateEvent"
+	// StreamEventArtifact is a TaskArtifactUpdateEvent — emitted as the agent
+	// produces output artifacts (files, structured payloads).
+	StreamEventArtifact StreamEventKind = "TaskArtifactUpdateEvent"
+	// StreamEventMessage is a MessageEvent — emitted when the agent sends a
+	// synchronous reply Message inline during streaming.
+	StreamEventMessage StreamEventKind = "MessageEvent"
+)
+
+// StreamEvent is the union shape passed between the broker and SSE handlers.
+// Exactly one of Status / Artifact / Message is set, matching Kind. The
+// handler renders it onto the wire as `event: <kind>\ndata: <json>\n\n` with
+// the appropriate sub-struct JSON-encoded as data.
+type StreamEvent struct {
+	Kind     StreamEventKind         `json:"-"`
+	Status   *TaskStatusUpdateEvent  `json:"status,omitempty"`
+	Artifact *TaskArtifactUpdateEvent `json:"artifact,omitempty"`
+	Message  *Message                `json:"message,omitempty"`
+}
+
+// TaskStatusUpdateEvent is the SSE payload for a task lifecycle transition
+// (spec §4.2). Final=true on terminal transitions (COMPLETED, CANCELLED,
+// FAILED, REJECTED); clients close their connection on Final.
+type TaskStatusUpdateEvent struct {
+	TaskID    string     `json:"taskId"`
+	ContextID string     `json:"contextId,omitempty"`
+	Status    TaskStatus `json:"status"`
+	Final     bool       `json:"final"`
+}
+
+// TaskArtifactUpdateEvent is the SSE payload for artifact streaming. LastChunk
+// signals the artifact is complete; Append=true means parts should be merged
+// into an existing artifact rather than replacing.
+type TaskArtifactUpdateEvent struct {
+	TaskID    string   `json:"taskId"`
+	ContextID string   `json:"contextId,omitempty"`
+	Artifact  Artifact `json:"artifact"`
+	Append    bool     `json:"append,omitempty"`
+	LastChunk bool     `json:"lastChunk,omitempty"`
+}
+
 // Task is a long-running agent invocation handle (spec §4.2).
 type Task struct {
 	ID        string            `json:"id"`

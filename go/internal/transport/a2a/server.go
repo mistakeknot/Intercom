@@ -46,6 +46,7 @@ type Config struct {
 type Server struct {
 	cfg     Config
 	store   *Store
+	broker  *Broker
 	mux     *http.ServeMux
 	inbound chan transport.InboundMessage
 
@@ -79,15 +80,19 @@ func New(cfg Config) *Server {
 	if cfg.Store == nil {
 		cfg.Store = NewStore()
 	}
+	broker := NewBroker()
+	cfg.Store.SetPublisher(broker)
+	cfg.Card.Capabilities.Streaming = true
 	s := &Server{
 		cfg:     cfg,
 		store:   cfg.Store,
+		broker:  broker,
 		mux:     http.NewServeMux(),
 		inbound: make(chan transport.InboundMessage, cfg.InboundBuffer),
 	}
 	s.mux.HandleFunc("GET /.well-known/agent.json", s.handleAgentCard)
 	s.mux.HandleFunc("POST /messages", s.handleMessages)
-	s.mux.HandleFunc("POST /messages:stream", s.handleNotImplemented)
+	s.mux.HandleFunc("POST /messages:stream", s.handleMessagesStream)
 	s.mux.HandleFunc("GET /tasks", s.handleListTasks)
 	s.mux.HandleFunc("GET /tasks/{id}", s.handleGetTask)
 	s.mux.HandleFunc("POST /tasks/{id}", s.handlePostTask)
@@ -246,8 +251,7 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 	id, suffix := splitTaskIDSuffix(r.PathValue("id"))
 	if suffix == "subscribe" {
-		// SSE task subscription lives in sub-bead .1.
-		s.handleNotImplemented(w, r)
+		s.handleTaskSubscribe(w, r, id)
 		return
 	}
 	if suffix != "" {

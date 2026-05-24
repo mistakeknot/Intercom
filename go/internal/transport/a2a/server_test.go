@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -196,20 +195,9 @@ func TestSendMessageRejectsMissingMessageID(t *testing.T) {
 	}
 }
 
-func TestStreamingEndpointReturns501(t *testing.T) {
-	srv := newTestServer(t)
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-
-	resp, err := http.Post(ts.URL+"/messages:stream", "application/json", strings.NewReader("{}"))
-	if err != nil {
-		t.Fatalf("POST /messages:stream: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotImplemented {
-		t.Fatalf("status = %d, want 501", resp.StatusCode)
-	}
-}
+// Streaming behavior (POST /messages:stream + GET /tasks/{id}:subscribe) is
+// covered in stream_test.go. This file historically tested 501 stubs; now
+// folded into the real behavior tests.
 
 func TestTaskLifecycle_CreateListGetCancel(t *testing.T) {
 	srv := newTestServer(t)
@@ -362,14 +350,18 @@ func TestTaskLifecycle_CreateListGetCancel(t *testing.T) {
 		t.Errorf("second cancel status = %d, want 409", respCancel2.StatusCode)
 	}
 
-	// 8. GET /tasks/{id}:subscribe → 501 (sub-bead .1).
-	respSub, err := http.Get(ts.URL + "/tasks/" + taskIDs[0] + ":subscribe")
+	// 8. GET /tasks/{id}:subscribe streams the current state then closes when terminal.
+	// taskIDs[1] is already CANCELLED at this point; backfill emits one final event.
+	respSub, err := http.Get(ts.URL + "/tasks/" + taskIDs[1] + ":subscribe")
 	if err != nil {
 		t.Fatalf("GET :subscribe: %v", err)
 	}
-	respSub.Body.Close()
-	if respSub.StatusCode != http.StatusNotImplemented {
-		t.Errorf("subscribe status = %d, want 501", respSub.StatusCode)
+	defer respSub.Body.Close()
+	if respSub.StatusCode != http.StatusOK {
+		t.Errorf("subscribe status = %d, want 200", respSub.StatusCode)
+	}
+	if ct := respSub.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("subscribe Content-Type = %q, want text/event-stream", ct)
 	}
 }
 
