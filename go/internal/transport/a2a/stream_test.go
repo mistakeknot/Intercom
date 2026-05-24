@@ -457,7 +457,20 @@ func TestStreamUntilFinal_ExitOnClientCancel(t *testing.T) {
 		t.Fatal("streaming handler did not exit within 1s of client cancel")
 	}
 
-	if got := srv.broker.SubscriberCount(task.ID); got != 0 {
+	// The handler's defer Unsubscribe runs as the handler goroutine unwinds;
+	// the HTTP framework signals the response body close to the client side
+	// before that unwind completes in all schedulers (observed flaky in
+	// single-CPU runs). Poll within a deadline to absorb the small window.
+	deadline := time.Now().Add(time.Second)
+	var got int
+	for time.Now().Before(deadline) {
+		got = srv.broker.SubscriberCount(task.ID)
+		if got == 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got != 0 {
 		t.Errorf("broker SubscriberCount = %d after client cancel, want 0 (defer Unsubscribe)", got)
 	}
 }

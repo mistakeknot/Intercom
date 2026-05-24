@@ -400,17 +400,6 @@ func TestServerImplementsTransport(t *testing.T) {
 	var _ transport.Transport = (*Server)(nil)
 }
 
-func TestSendReturnsOutboundNotImplemented(t *testing.T) {
-	srv := newTestServer(t)
-	err := srv.Send(context.Background(), transport.OutboundMessage{
-		RecipientURI: "sylveste://agent/peer",
-		ContextID:    "sylveste-test",
-		Parts:        []transport.Part{{Kind: transport.PartText, Text: "hi"}},
-	})
-	if err == nil {
-		t.Fatal("Send did not return error")
-	}
-	if err != ErrOutboundNotImplemented {
-		t.Errorf("Send err = %v, want ErrOutboundNotImplemented", err)
-	}
-}
+// Send behavior — the round-trip happy path, error cases (no resolver,
+// unknown recipient, peer non-2xx), bearer-token pass-through, and agent
+// card cache hits — is covered in outbound_test.go.

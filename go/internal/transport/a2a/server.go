@@ -23,11 +23,20 @@ import (
 // Store is the Task store used by /tasks endpoints and by POST /messages to
 // register newly-created tasks. If nil, New constructs an in-memory store.
 // Tests can inject a custom store; v2 will inject the Dolt-backed variant.
+//
+// Resolver maps outbound RecipientURI → base HTTP URL. Required for
+// Server.Send; when nil, Send returns ErrNoResolver. OutboundHTTP is the HTTP
+// client used for outbound A2A requests; defaults to http.DefaultClient.
+// AgentCardTTL controls peer Agent Card cache lifetime; defaults to
+// DefaultAgentCardTTL when zero.
 type Config struct {
 	AgentName     string
 	Card          AgentCard
 	InboundBuffer int
 	Store         *Store
+	Resolver      Resolver
+	OutboundHTTP  *http.Client
+	AgentCardTTL  time.Duration
 }
 
 // Server is the A2A HTTP transport. Implements transport.Transport.
@@ -39,10 +48,11 @@ type Config struct {
 // delivering backpressure to the calling A2A peer (which sees a slow response
 // and naturally throttles).
 //
-// The outbound path is stubbed for v1 — Send returns an error noting the
-// outbound client lands in a sub-bead. Inbound is sufficient for the bulk of
-// human-↔-agent traffic; outbound agent-↔-agent calls become important when
-// Sylveste agents start invoking external A2A peers.
+// The outbound path is implemented at outbound.go: Send resolves the
+// RecipientURI through cfg.Resolver, fetches the peer's Agent Card (cached
+// per host), and POSTs an A2A SendMessageRequest. Bearer tokens are passed
+// through from the request context; full OAuth2 acquisition lives in
+// sylveste-ewy3.4.1.4 (Gridfire-v1).
 type Server struct {
 	cfg     Config
 	store   *Store
@@ -55,6 +65,10 @@ type Server struct {
 
 	lastInbound  atomic.Int64
 	lastOutbound atomic.Int64
+
+	resolver   Resolver
+	httpClient *http.Client
+	cardCache  *agentCardCache
 }
 
 // New constructs a Server with the given config. The HTTP handler is reachable
@@ -83,12 +97,19 @@ func New(cfg Config) *Server {
 	broker := NewBroker()
 	cfg.Store.SetPublisher(broker)
 	cfg.Card.Capabilities.Streaming = true
+	httpClient := cfg.OutboundHTTP
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
 	s := &Server{
-		cfg:     cfg,
-		store:   cfg.Store,
-		broker:  broker,
-		mux:     http.NewServeMux(),
-		inbound: make(chan transport.InboundMessage, cfg.InboundBuffer),
+		cfg:        cfg,
+		store:      cfg.Store,
+		broker:     broker,
+		mux:        http.NewServeMux(),
+		inbound:    make(chan transport.InboundMessage, cfg.InboundBuffer),
+		resolver:   cfg.Resolver,
+		httpClient: httpClient,
+		cardCache:  newAgentCardCache(cfg.AgentCardTTL),
 	}
 	s.mux.HandleFunc("GET /.well-known/agent.json", s.handleAgentCard)
 	s.mux.HandleFunc("POST /messages", s.handleMessages)
@@ -115,17 +136,22 @@ func (s *Server) Name() string { return "a2a" }
 
 // Send delivers an outbound message to a remote A2A peer.
 //
-// v1: not yet implemented. The outbound client lands in a sub-bead. Returning
-// ErrOutboundNotImplemented lets the routing layer fall back to other transports
-// or surface the gap to the user without crashing.
+// Implementation: resolve msg.RecipientURI → peer base URL via cfg.Resolver,
+// optionally warm the Agent Card cache, then POST an A2A SendMessageRequest
+// to <baseURL>/messages with the sender identity injected into Metadata so
+// the peer can attribute us. Bearer tokens carried on ctx (see
+// WithBearerToken) are sent as Authorization: Bearer <token>; full OAuth2
+// acquisition lives in sylveste-ewy3.4.1.4.
+//
+// Errors:
+//
+//   - ErrNoResolver        cfg.Resolver was nil
+//   - ErrUnknownRecipient  resolver did not know msg.RecipientURI (wrapped)
+//   - HTTP transport error network failure or ctx cancel (wrapped)
+//   - peer non-2xx         wrapped with the observed status code
 func (s *Server) Send(ctx context.Context, msg transport.OutboundMessage) error {
-	return ErrOutboundNotImplemented
+	return s.sendOutbound(ctx, msg)
 }
-
-// ErrOutboundNotImplemented is returned by Send until the outbound A2A client
-// lands. Routing layer recognizes it and either retries on another transport
-// or surfaces a friendly message; never treated as a transient error.
-var ErrOutboundNotImplemented = errors.New("a2a: outbound client not implemented in v1 — see sylveste-ewy3.4.1 sub-beads")
 
 // Subscribe yields canonical inbound messages translated from POST /messages.
 // Called once per process lifecycle by the routing layer; subsequent calls
