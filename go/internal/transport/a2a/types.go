@@ -82,6 +82,14 @@ type SendMessageResponse struct {
 	Task    *Task    `json:"task,omitempty"`
 }
 
+// ListTasksResponse is the body of GET /tasks. NextCursor is empty when no
+// further pages exist; callers pass it back as the `cursor` query param to
+// fetch the next page.
+type ListTasksResponse struct {
+	Tasks      []Task `json:"tasks"`
+	NextCursor string `json:"nextCursor,omitempty"`
+}
+
 // Task is a long-running agent invocation handle (spec §4.2).
 type Task struct {
 	ID        string            `json:"id"`

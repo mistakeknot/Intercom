@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,10 +19,15 @@ import (
 // /.well-known/agent.json. InboundBuffer controls Subscribe channel capacity;
 // per the transport contract this MUST stay around 100 to deliver backpressure
 // to the wire (here: HTTP request handlers block until the channel drains).
+//
+// Store is the Task store used by /tasks endpoints and by POST /messages to
+// register newly-created tasks. If nil, New constructs an in-memory store.
+// Tests can inject a custom store; v2 will inject the Dolt-backed variant.
 type Config struct {
 	AgentName     string
 	Card          AgentCard
 	InboundBuffer int
+	Store         *Store
 }
 
 // Server is the A2A HTTP transport. Implements transport.Transport.
@@ -38,6 +45,7 @@ type Config struct {
 // Sylveste agents start invoking external A2A peers.
 type Server struct {
 	cfg     Config
+	store   *Store
 	mux     *http.ServeMux
 	inbound chan transport.InboundMessage
 
@@ -52,6 +60,15 @@ type Server struct {
 // via [Server.Handler]; mount it on whatever listener the host process owns
 // (Intercom hosts one listener and demuxes by Host header for multi-agent
 // co-residency).
+//
+// Routes registered (Go 1.22+ method-aware patterns):
+//
+//	GET  /.well-known/agent.json   Agent Card discovery
+//	POST /messages                 SendMessage (sync ack)
+//	POST /messages:stream          501 — SSE under sub-bead .1
+//	GET  /tasks                    ListTasks with cursor pagination
+//	GET  /tasks/{id}               GetTask; id may carry :subscribe suffix → 501
+//	POST /tasks/{id}               id MUST carry :cancel suffix → CancelTask
 func New(cfg Config) *Server {
 	if cfg.InboundBuffer <= 0 {
 		cfg.InboundBuffer = 100
@@ -59,26 +76,33 @@ func New(cfg Config) *Server {
 	if cfg.Card.ProtocolVersion == "" {
 		cfg.Card.ProtocolVersion = "1.0"
 	}
-	if cfg.Card.Capabilities.Streaming || cfg.Card.Capabilities.PushNotifications {
-		// Surface in the card but the v1 server does not implement these yet;
-		// requests to streaming/push endpoints return 501.
+	if cfg.Store == nil {
+		cfg.Store = NewStore()
 	}
 	s := &Server{
 		cfg:     cfg,
+		store:   cfg.Store,
 		mux:     http.NewServeMux(),
 		inbound: make(chan transport.InboundMessage, cfg.InboundBuffer),
 	}
-	s.mux.HandleFunc("/.well-known/agent.json", s.handleAgentCard)
-	s.mux.HandleFunc("/messages", s.handleMessages)
-	s.mux.HandleFunc("/messages:stream", s.handleNotImplemented)
-	s.mux.HandleFunc("/tasks", s.handleNotImplemented)
-	s.mux.HandleFunc("/tasks/", s.handleNotImplemented)
+	s.mux.HandleFunc("GET /.well-known/agent.json", s.handleAgentCard)
+	s.mux.HandleFunc("POST /messages", s.handleMessages)
+	s.mux.HandleFunc("POST /messages:stream", s.handleNotImplemented)
+	s.mux.HandleFunc("GET /tasks", s.handleListTasks)
+	s.mux.HandleFunc("GET /tasks/{id}", s.handleGetTask)
+	s.mux.HandleFunc("POST /tasks/{id}", s.handlePostTask)
 	return s
 }
 
 // Handler returns the HTTP handler for this A2A server.
 func (s *Server) Handler() http.Handler {
 	return s.mux
+}
+
+// Store returns the Task store wired into this server. Useful for tests and
+// for the routing layer to mark tasks COMPLETED when a sprint finishes.
+func (s *Server) Store() *Store {
+	return s.store
 }
 
 // Name reports the transport identifier ("a2a"). Stable across releases.
@@ -129,10 +153,6 @@ func (s *Server) Health(ctx context.Context) transport.Health {
 }
 
 func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(s.cfg.Card); err != nil {
 		http.Error(w, "encode agent card: "+err.Error(), http.StatusInternalServerError)
@@ -141,11 +161,6 @@ func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	var req SendMessageRequest
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -161,31 +176,38 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		req.Message.Role = RoleUser
 	}
 
+	// Register a Task BEFORE pushing to the inbound channel so listing/cancel
+	// is possible even mid-flight. Initial state is SUBMITTED; transitions to
+	// WORKING once we successfully hand off to the routing layer.
+	task := s.store.Create(req.Message.ContextID)
+
 	inbound := ToInbound(req.Message, s.cfg.AgentName)
+	if inbound.WireMetadata == nil {
+		inbound.WireMetadata = map[string]string{}
+	}
+	inbound.WireMetadata["a2a.taskId"] = task.ID
 
 	// Deliver to the inbound channel under request context. Block here gives
 	// backpressure to the calling peer — they see a slow response and naturally
-	// throttle without us buffering unboundedly.
+	// throttle without us buffering unboundedly. Cancel the task and return
+	// 408 if the request context is cancelled before handoff.
 	select {
 	case s.inbound <- inbound:
 		s.lastInbound.Store(time.Now().UnixNano())
+		if updated, err := s.store.UpdateStatus(task.ID, TaskStateWorking); err == nil {
+			task = updated
+		}
 	case <-r.Context().Done():
+		// Best effort: mark cancelled so /tasks listings reflect the abandoned task.
+		if updated, err := s.store.Cancel(task.ID); err == nil {
+			task = updated
+		}
 		http.Error(w, "request cancelled", http.StatusRequestTimeout)
 		return
 	}
 
-	// v1 synchronous reply: acknowledge receipt with a Task in WORKING state.
-	// The streaming path (POST /messages:stream) will return the same Task and
-	// then stream status updates over SSE; that lands in a sub-bead.
 	resp := SendMessageResponse{
-		Task: &Task{
-			ID:        generateMessageID(),
-			ContextID: req.Message.ContextID,
-			Status: TaskStatus{
-				State:     TaskStateWorking,
-				Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
-			},
-		},
+		Task: &task,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -194,6 +216,93 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		// Already wrote 202 — nothing more we can do.
 		_ = err
 	}
+}
+
+func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
+	cursor := r.URL.Query().Get("cursor")
+	limit := 50
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			http.Error(w, "invalid limit: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		limit = n
+	}
+
+	tasks, next := s.store.List(cursor, limit)
+	resp := ListTasksResponse{
+		Tasks:      tasks,
+		NextCursor: next,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		http.Error(w, "encode list response: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
+func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
+	id, suffix := splitTaskIDSuffix(r.PathValue("id"))
+	if suffix == "subscribe" {
+		// SSE task subscription lives in sub-bead .1.
+		s.handleNotImplemented(w, r)
+		return
+	}
+	if suffix != "" {
+		http.Error(w, "unknown task action: "+suffix, http.StatusBadRequest)
+		return
+	}
+
+	task, ok := s.store.Get(id)
+	if !ok {
+		http.Error(w, "task not found: "+id, http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(task); err != nil {
+		http.Error(w, "encode task: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
+func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
+	id, suffix := splitTaskIDSuffix(r.PathValue("id"))
+	switch suffix {
+	case "cancel":
+		task, err := s.store.Cancel(id)
+		switch {
+		case errors.Is(err, ErrTaskNotFound):
+			http.Error(w, "task not found: "+id, http.StatusNotFound)
+			return
+		case errors.Is(err, ErrTaskTerminal):
+			http.Error(w, "task already in terminal state", http.StatusConflict)
+			return
+		case err != nil:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if encErr := json.NewEncoder(w).Encode(task); encErr != nil {
+			http.Error(w, "encode task: "+encErr.Error(), http.StatusInternalServerError)
+		}
+	case "":
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	default:
+		http.Error(w, "unknown task action: "+suffix, http.StatusBadRequest)
+	}
+}
+
+// splitTaskIDSuffix separates an "<id>:<action>" path-value into its parts.
+// Returns (id, action) where action is "cancel", "subscribe", etc. When the
+// path value has no colon, action is empty and id is the full value.
+func splitTaskIDSuffix(v string) (id, action string) {
+	if i := strings.LastIndex(v, ":"); i >= 0 {
+		return v[:i], v[i+1:]
+	}
+	return v, ""
 }
 
 func (s *Server) handleNotImplemented(w http.ResponseWriter, r *http.Request) {

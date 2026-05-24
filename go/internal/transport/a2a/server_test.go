@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -207,6 +208,199 @@ func TestStreamingEndpointReturns501(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want 501", resp.StatusCode)
+	}
+}
+
+func TestTaskLifecycle_CreateListGetCancel(t *testing.T) {
+	srv := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ch, err := srv.Subscribe(ctx)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	// Drain inbound so handleMessages can hand off without blocking.
+	go func() {
+		for range ch {
+		}
+	}()
+
+	// 1. Create three tasks via POST /messages.
+	var taskIDs []string
+	for i := 0; i < 3; i++ {
+		body := SendMessageRequest{
+			Message: Message{
+				MessageID: "msg-" + strconv.Itoa(i),
+				Role:      RoleUser,
+				ContextID: "sylveste-bead-lifecycle",
+				Parts:     []Part{{Text: "hi"}},
+			},
+		}
+		buf, _ := json.Marshal(body)
+		resp, err := http.Post(ts.URL+"/messages", "application/json", bytes.NewReader(buf))
+		if err != nil {
+			t.Fatalf("POST /messages #%d: %v", i, err)
+		}
+		var smr SendMessageResponse
+		if decErr := json.NewDecoder(resp.Body).Decode(&smr); decErr != nil {
+			resp.Body.Close()
+			t.Fatalf("decode #%d: %v", i, decErr)
+		}
+		resp.Body.Close()
+		if smr.Task == nil {
+			t.Fatalf("response #%d Task nil", i)
+		}
+		if smr.Task.Status.State != TaskStateWorking {
+			t.Errorf("response #%d State = %q, want WORKING", i, smr.Task.Status.State)
+		}
+		taskIDs = append(taskIDs, smr.Task.ID)
+	}
+
+	// 2. GET /tasks lists all three.
+	resp, err := http.Get(ts.URL + "/tasks")
+	if err != nil {
+		t.Fatalf("GET /tasks: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /tasks status = %d, want 200", resp.StatusCode)
+	}
+	var listResp ListTasksResponse
+	if decErr := json.NewDecoder(resp.Body).Decode(&listResp); decErr != nil {
+		t.Fatalf("decode list: %v", decErr)
+	}
+	if len(listResp.Tasks) != 3 {
+		t.Errorf("List returned %d tasks, want 3", len(listResp.Tasks))
+	}
+	if listResp.NextCursor != "" {
+		t.Errorf("NextCursor = %q, want empty (small page)", listResp.NextCursor)
+	}
+
+	// 3. GET /tasks?limit=2 paginates.
+	resp, err = http.Get(ts.URL + "/tasks?limit=2")
+	if err != nil {
+		t.Fatalf("GET /tasks?limit=2: %v", err)
+	}
+	var page1 ListTasksResponse
+	_ = json.NewDecoder(resp.Body).Decode(&page1)
+	resp.Body.Close()
+	if len(page1.Tasks) != 2 {
+		t.Errorf("page1 len = %d, want 2", len(page1.Tasks))
+	}
+	if page1.NextCursor == "" {
+		t.Error("page1 NextCursor empty, want cursor for page2")
+	}
+
+	resp, err = http.Get(ts.URL + "/tasks?limit=2&cursor=" + page1.NextCursor)
+	if err != nil {
+		t.Fatalf("GET /tasks page2: %v", err)
+	}
+	var page2 ListTasksResponse
+	_ = json.NewDecoder(resp.Body).Decode(&page2)
+	resp.Body.Close()
+	if len(page2.Tasks) != 1 {
+		t.Errorf("page2 len = %d, want 1", len(page2.Tasks))
+	}
+	if page2.NextCursor != "" {
+		t.Errorf("page2 NextCursor = %q, want empty", page2.NextCursor)
+	}
+
+	// 4. GET /tasks/{id} returns the task by ID.
+	resp, err = http.Get(ts.URL + "/tasks/" + taskIDs[0])
+	if err != nil {
+		t.Fatalf("GET /tasks/{id}: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /tasks/{id} status = %d, want 200", resp.StatusCode)
+	}
+	var got Task
+	if decErr := json.NewDecoder(resp.Body).Decode(&got); decErr != nil {
+		t.Fatalf("decode get: %v", decErr)
+	}
+	if got.ID != taskIDs[0] {
+		t.Errorf("ID = %q, want %q", got.ID, taskIDs[0])
+	}
+
+	// 5. GET /tasks/unknown returns 404.
+	resp404, err := http.Get(ts.URL + "/tasks/unknown-task-id")
+	if err != nil {
+		t.Fatalf("GET unknown: %v", err)
+	}
+	resp404.Body.Close()
+	if resp404.StatusCode != http.StatusNotFound {
+		t.Errorf("GET unknown status = %d, want 404", resp404.StatusCode)
+	}
+
+	// 6. POST /tasks/{id}:cancel transitions to CANCELLED.
+	respCancel, err := http.Post(ts.URL+"/tasks/"+taskIDs[1]+":cancel", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST :cancel: %v", err)
+	}
+	defer respCancel.Body.Close()
+	if respCancel.StatusCode != http.StatusOK {
+		t.Fatalf("cancel status = %d, want 200", respCancel.StatusCode)
+	}
+	var cancelled Task
+	if decErr := json.NewDecoder(respCancel.Body).Decode(&cancelled); decErr != nil {
+		t.Fatalf("decode cancel: %v", decErr)
+	}
+	if cancelled.Status.State != TaskStateCancelled {
+		t.Errorf("cancelled State = %q, want CANCELLED", cancelled.Status.State)
+	}
+
+	// 7. Second cancel on the same task returns 409 (already terminal).
+	respCancel2, err := http.Post(ts.URL+"/tasks/"+taskIDs[1]+":cancel", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST :cancel #2: %v", err)
+	}
+	respCancel2.Body.Close()
+	if respCancel2.StatusCode != http.StatusConflict {
+		t.Errorf("second cancel status = %d, want 409", respCancel2.StatusCode)
+	}
+
+	// 8. GET /tasks/{id}:subscribe → 501 (sub-bead .1).
+	respSub, err := http.Get(ts.URL + "/tasks/" + taskIDs[0] + ":subscribe")
+	if err != nil {
+		t.Fatalf("GET :subscribe: %v", err)
+	}
+	respSub.Body.Close()
+	if respSub.StatusCode != http.StatusNotImplemented {
+		t.Errorf("subscribe status = %d, want 501", respSub.StatusCode)
+	}
+}
+
+func TestPostTaskWithoutActionReturns405(t *testing.T) {
+	srv := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	task := srv.Store().Create("ctx")
+	resp, err := http.Post(ts.URL+"/tasks/"+task.ID, "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /tasks/{id}: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405", resp.StatusCode)
+	}
+}
+
+func TestListTasksInvalidLimitReturns400(t *testing.T) {
+	srv := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/tasks?limit=notanumber")
+	if err != nil {
+		t.Fatalf("GET /tasks: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
 	}
 }
 
