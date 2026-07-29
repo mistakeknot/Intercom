@@ -39,6 +39,4 @@ agents-sdk-docs
 # Clavain session artifacts
 .clavain/
 .clavain/verdicts/
-
-# Machine-local interspect telemetry (SQLite); git-autosync does 'git add -A'
-.clavain/interspect/
+.clavain/**/*.db
