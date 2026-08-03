@@ -42,3 +42,12 @@ agents-sdk-docs
 .clavain/**/*.db
 .clavain/**/*.db-shm
 .clavain/**/*.db-wal
+
+# core.hooksPath points here, so this is where the shared pre-commit secret
+# scanner lives -- git machinery, exactly like .git/hooks, which is never
+# tracked either. There is no beads in this repo: no config.yaml, no
+# issues.jsonl, nothing but the one hook file cloud/install-hooks.sh wrote.
+#
+# Scoped to hooks/ rather than the whole .beads/ so that if beads is ever
+# actually initialised here, its issues.jsonl is not silently ignored.
+.beads/hooks/
