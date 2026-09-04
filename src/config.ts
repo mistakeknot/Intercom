@@ -75,6 +75,11 @@ export const MODEL_CATALOG: ModelEntry[] = [
     displayName: 'Gemini 2.5 Flash',
   },
   { id: 'gpt-5.3-codex', runtime: 'codex', displayName: 'GPT-5.3 Codex' },
+  {
+    id: 'gpt-6-astra',
+    runtime: 'codex',
+    displayName: 'GPT-6 Astra (opt-in)',
+  },
 ];
 
 export const DEFAULT_MODEL = 'claude-opus-4-6';

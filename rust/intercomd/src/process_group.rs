@@ -18,7 +18,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use intercom_core::{
-    ContainerInput, ContainerOutput, ContainerStatus, PgPool, RegisteredGroup, RuntimeKind,
+    ContainerInput, ContainerOutput, ContainerStatus, PgPool, RegisteredGroup, RuntimeConfig,
+    RuntimeKind,
 };
 use tokio::sync::{Notify, RwLock};
 use tokio::task::JoinHandle;
@@ -45,6 +46,7 @@ pub fn build_process_messages_fn(
     telegram: Arc<TelegramBridge>,
     assistant_name: String,
     main_group_folder: String,
+    runtime_config: RuntimeConfig,
     run_config: RunConfig,
     pool_config: PoolConfig,
 ) -> ProcessMessagesFn {
@@ -57,6 +59,7 @@ pub fn build_process_messages_fn(
         let telegram = telegram.clone();
         let assistant_name = assistant_name.clone();
         let main_group_folder = main_group_folder.clone();
+        let runtime_config = runtime_config.clone();
         let run_config = run_config.clone();
         let pool_config = pool_config.clone();
 
@@ -71,6 +74,7 @@ pub fn build_process_messages_fn(
                 &telegram,
                 &assistant_name,
                 &main_group_folder,
+                &runtime_config,
                 &run_config,
                 &pool_config,
             )
@@ -97,6 +101,7 @@ async fn process_group_messages(
     telegram: &Arc<TelegramBridge>,
     assistant_name: &str,
     main_group_folder: &str,
+    runtime_config: &RuntimeConfig,
     run_config: &RunConfig,
     pool_config: &PoolConfig,
 ) -> anyhow::Result<bool> {
@@ -163,7 +168,8 @@ async fn process_group_messages(
     );
 
     // 5. Resolve runtime and session
-    let runtime = resolve_runtime(&group);
+    let execution_profile = resolve_execution_profile(&group, runtime_config);
+    let runtime = execution_profile.runtime;
     let mut session_id = {
         let s = sessions.read().await;
         s.get(&group.folder).cloned()
@@ -214,7 +220,9 @@ async fn process_group_messages(
         is_main,
         is_scheduled_task: None,
         assistant_name: Some(assistant_name.to_string()),
-        model: group.model.clone(),
+        model: execution_profile.model,
+        reasoning_effort: execution_profile.reasoning_effort,
+        service_tier: execution_profile.service_tier,
         secrets: None, // Secrets injected by runner from env files
         previous_context: None,
     };
@@ -788,11 +796,74 @@ async fn process_group_messages(
 }
 
 /// Resolve runtime kind from group configuration.
+#[cfg(test)]
 pub(crate) fn resolve_runtime(group: &RegisteredGroup) -> RuntimeKind {
-    match group.runtime.as_deref() {
-        Some("gemini") => RuntimeKind::Gemini,
-        Some("codex") => RuntimeKind::Codex,
-        _ => RuntimeKind::Claude, // default
+    resolve_execution_profile(group, &RuntimeConfig::default()).runtime
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExecutionProfile {
+    pub runtime: RuntimeKind,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub service_tier: Option<String>,
+}
+
+fn runtime_kind(runtime: Option<&str>, provider: Option<&str>) -> RuntimeKind {
+    match runtime {
+        Some("gemini") => return RuntimeKind::Gemini,
+        Some("codex") => return RuntimeKind::Codex,
+        Some("claude") => return RuntimeKind::Claude,
+        _ => {}
+    }
+    match provider {
+        Some("code-assist") | Some("google") => RuntimeKind::Gemini,
+        Some("openai") => RuntimeKind::Codex,
+        _ => RuntimeKind::Claude,
+    }
+}
+
+/// Resolve the container backend and its execution settings without changing
+/// the configured default. An exact model/profile match lets `gpt-6-astra`
+/// opt into Astra's high/Standard profile while ordinary Codex work stays on
+/// the existing Codex profile.
+pub(crate) fn resolve_execution_profile(
+    group: &RegisteredGroup,
+    runtime_config: &RuntimeConfig,
+) -> ExecutionProfile {
+    let requested_profile = group
+        .runtime
+        .as_deref()
+        .unwrap_or(&runtime_config.default_runtime);
+    let profile = group
+        .model
+        .as_deref()
+        .and_then(|model| {
+            runtime_config
+                .profiles
+                .values()
+                .find(|profile| profile.default_model == model)
+        })
+        .or_else(|| runtime_config.profiles.get(requested_profile))
+        .or_else(|| runtime_config.profiles.get(&runtime_config.default_runtime));
+
+    let runtime = runtime_kind(
+        profile
+            .and_then(|entry| entry.runtime.as_deref())
+            .or(Some(requested_profile)),
+        profile.map(|entry| entry.provider.as_str()),
+    );
+    let model = group.model.clone().or_else(|| {
+        profile
+            .map(|entry| entry.default_model.clone())
+            .filter(|model| !model.is_empty())
+    });
+
+    ExecutionProfile {
+        runtime,
+        model,
+        reasoning_effort: profile.and_then(|entry| entry.reasoning_effort.clone()),
+        service_tier: profile.and_then(|entry| entry.service_tier.clone()),
     }
 }
 
@@ -879,5 +950,47 @@ mod tests {
             model: None,
         };
         assert_eq!(resolve_runtime(&group), RuntimeKind::Gemini);
+    }
+
+    #[test]
+    fn astra_model_selects_the_opt_in_execution_profile() {
+        let group = RegisteredGroup {
+            jid: "tg:123".into(),
+            name: "Astra canary".into(),
+            folder: "astra-canary".into(),
+            trigger: String::new(),
+            added_at: String::new(),
+            container_config: None,
+            requires_trigger: None,
+            runtime: Some("codex".into()),
+            model: Some("gpt-6-astra".into()),
+        };
+
+        let profile = resolve_execution_profile(&group, &intercom_core::RuntimeConfig::default());
+        assert_eq!(profile.runtime, RuntimeKind::Codex);
+        assert_eq!(profile.model.as_deref(), Some("gpt-6-astra"));
+        assert_eq!(profile.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(profile.service_tier.as_deref(), Some("standard"));
+    }
+
+    #[test]
+    fn routine_codex_profile_remains_unmodified() {
+        let group = RegisteredGroup {
+            jid: "tg:123".into(),
+            name: "Routine Codex".into(),
+            folder: "routine-codex".into(),
+            trigger: String::new(),
+            added_at: String::new(),
+            container_config: None,
+            requires_trigger: None,
+            runtime: Some("codex".into()),
+            model: Some("gpt-5.3-codex".into()),
+        };
+
+        let profile = resolve_execution_profile(&group, &intercom_core::RuntimeConfig::default());
+        assert_eq!(profile.runtime, RuntimeKind::Codex);
+        assert_eq!(profile.model.as_deref(), Some("gpt-5.3-codex"));
+        assert_eq!(profile.reasoning_effort, None);
+        assert_eq!(profile.service_tier, None);
     }
 }

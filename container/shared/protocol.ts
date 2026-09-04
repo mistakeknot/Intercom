@@ -18,6 +18,8 @@ export interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   model?: string;
+  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  serviceTier?: 'standard' | 'fast' | 'flex' | 'batch';
   secrets?: Record<string, string>;
   previousContext?: string;
 }

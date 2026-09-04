@@ -11,14 +11,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use intercom_core::{ContainerInput, ContainerOutput, ContainerStatus, NewMessage, PgPool, PoolConfig, RegisteredGroup};
+use intercom_core::{
+    ContainerInput, ContainerOutput, ContainerStatus, NewMessage, PgPool, PoolConfig,
+    RegisteredGroup, RuntimeConfig,
+};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 use crate::container::mounts::GroupInfo;
 use crate::container::runner::{RunConfig, pool_spawn, run_container_agent, write_snapshots};
 use crate::container::security::ContainerConfig;
-use crate::process_group::resolve_runtime;
+use crate::process_group::resolve_execution_profile;
 use crate::queue::GroupQueue;
 use crate::scheduler::{DueTask, TaskCallback, calculate_next_run, result_summary};
 use crate::telegram::TelegramBridge;
@@ -33,6 +36,7 @@ pub fn build_task_callback(
     groups: Arc<RwLock<HashMap<String, RegisteredGroup>>>,
     sessions: Arc<RwLock<HashMap<String, String>>>,
     telegram: Arc<TelegramBridge>,
+    runtime_config: RuntimeConfig,
     run_config: RunConfig,
     timezone: String,
     pool_config: PoolConfig,
@@ -43,6 +47,7 @@ pub fn build_task_callback(
         let groups = groups.clone();
         let sessions = sessions.clone();
         let telegram = telegram.clone();
+        let runtime_config = runtime_config.clone();
         let run_config = run_config.clone();
         let timezone = timezone.clone();
         let pool_config = pool_config.clone();
@@ -53,15 +58,25 @@ pub fn build_task_callback(
         // Clone queue before moving it into the task_fn closure
         let queue_for_enqueue = queue.clone();
 
-        let task_fn = Box::new(move || -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-            Box::pin(async move {
-                run_scheduled_task(
-                    task, &pool, &queue, &groups, &sessions, &telegram, &run_config, &timezone,
-                    &pool_config,
-                )
-                .await;
-            })
-        });
+        let task_fn = Box::new(
+            move || -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+                Box::pin(async move {
+                    run_scheduled_task(
+                        task,
+                        &pool,
+                        &queue,
+                        &groups,
+                        &sessions,
+                        &telegram,
+                        &runtime_config,
+                        &run_config,
+                        &timezone,
+                        &pool_config,
+                    )
+                    .await;
+                })
+            },
+        );
 
         // Fire-and-forget: enqueue_task is async, so spawn a small task to call it
         tokio::spawn(async move {
@@ -78,6 +93,7 @@ async fn run_scheduled_task(
     groups: &Arc<RwLock<HashMap<String, RegisteredGroup>>>,
     sessions: &Arc<RwLock<HashMap<String, String>>>,
     telegram: &Arc<TelegramBridge>,
+    runtime_config: &RuntimeConfig,
     run_config: &RunConfig,
     timezone: &str,
     pool_config: &PoolConfig,
@@ -112,7 +128,8 @@ async fn run_scheduled_task(
         None // isolated tasks get a fresh session
     };
 
-    let runtime = resolve_runtime(&group);
+    let execution_profile = resolve_execution_profile(&group, runtime_config);
+    let runtime = execution_profile.runtime;
 
     // Clone before assistant_name is moved into ContainerInput
     let assistant_name_cb = assistant_name.clone();
@@ -126,7 +143,9 @@ async fn run_scheduled_task(
         is_main,
         is_scheduled_task: Some(true),
         assistant_name: Some(assistant_name),
-        model: group.model.clone(),
+        model: execution_profile.model,
+        reasoning_effort: execution_profile.reasoning_effort,
+        service_tier: execution_profile.service_tier,
         secrets: None,
         previous_context: None,
     };

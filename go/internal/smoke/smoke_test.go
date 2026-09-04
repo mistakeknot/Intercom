@@ -31,8 +31,8 @@ bind = "127.0.0.1:7340"
 	if cfg.Runtimes.DefaultRuntime != "claude" {
 		t.Errorf("default_runtime = %q, want claude", cfg.Runtimes.DefaultRuntime)
 	}
-	if len(cfg.Runtimes.Profiles) != 3 {
-		t.Errorf("profiles count = %d, want 3", len(cfg.Runtimes.Profiles))
+	if len(cfg.Runtimes.Profiles) != 4 {
+		t.Errorf("profiles count = %d, want 4", len(cfg.Runtimes.Profiles))
 	}
 }
 
@@ -77,6 +77,7 @@ func TestModelCatalogCompleteness(t *testing.T) {
 		"gemini-3.1-pro":    false,
 		"gemini-2.5-flash":  false,
 		"gpt-5.3-codex":     false,
+		"gpt-6-astra":       false,
 	}
 	for _, m := range catalog {
 		expected[m.ID] = true

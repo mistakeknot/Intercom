@@ -27,8 +27,15 @@ import {
   IPC_INPUT_DIR,
 } from '../../shared/ipc-input.js';
 import { archiveConversation, type ParsedMessage } from '../../shared/session-base.js';
+import {
+  buildCodexExecArgs,
+  type CodexReasoningEffort,
+  type CodexServiceTier,
+} from './args.js';
 
 let MODEL = 'gpt-5.3-codex';
+let REASONING_EFFORT: CodexReasoningEffort | undefined;
+let SERVICE_TIER: CodexServiceTier | undefined;
 
 function generateSessionId(): string {
   return `codex-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -47,16 +54,13 @@ async function runCodexExec(
   try { fs.unlinkSync(outputFile); } catch { /* ignore */ }
 
   return new Promise<string>((resolve, reject) => {
-    const args = [
-      'exec',
-      '--skip-git-repo-check',
-      '--ephemeral',
-      '--dangerously-bypass-approvals-and-sandbox',
-      '-C', workDir,
-      '-m', MODEL,
-      '-o', outputFile,
-      '-', // read prompt from stdin
-    ];
+    const args = buildCodexExecArgs({
+      workDir,
+      outputFile,
+      model: MODEL,
+      reasoningEffort: REASONING_EFFORT,
+      serviceTier: SERVICE_TIER,
+    });
 
     log(`Running: codex ${args.join(' ')}`);
 
@@ -116,6 +120,13 @@ async function main(): Promise<void> {
     if (containerInput.model) {
       MODEL = containerInput.model;
       log(`Using model from host: ${MODEL}`);
+    }
+    REASONING_EFFORT = containerInput.reasoningEffort;
+    SERVICE_TIER = containerInput.serviceTier;
+    if (REASONING_EFFORT || SERVICE_TIER) {
+      log(
+        `Using execution profile: effort=${REASONING_EFFORT ?? 'default'} service=${SERVICE_TIER ?? 'default'}`,
+      );
     }
   } catch (err) {
     writeOutput({

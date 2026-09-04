@@ -46,6 +46,11 @@ pub fn model_catalog() -> Vec<ModelEntry> {
             runtime: "codex".into(),
             display_name: "GPT-5.3 Codex".into(),
         },
+        ModelEntry {
+            id: "gpt-6-astra".into(),
+            runtime: "codex".into(),
+            display_name: "GPT-6 Astra (opt-in)".into(),
+        },
     ]
 }
 
@@ -536,6 +541,7 @@ mod tests {
         assert!(result.text.contains("Claude Opus 4.6"));
         assert!(result.text.contains("(active)"));
         assert!(result.text.contains("Gemini"));
+        assert!(result.text.contains("GPT-6 Astra (opt-in)"));
     }
 
     #[test]
@@ -555,6 +561,13 @@ mod tests {
     fn model_switch_substring() {
         let model = resolve_model("codex");
         assert_eq!(model.id, "gpt-5.3-codex");
+    }
+
+    #[test]
+    fn model_switch_astra_is_explicitly_opt_in() {
+        let model = resolve_model("astra");
+        assert_eq!(model.id, "gpt-6-astra");
+        assert_eq!(model.runtime, "codex");
     }
 
     #[test]

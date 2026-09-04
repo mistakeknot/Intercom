@@ -111,9 +111,12 @@ bind = "127.0.0.1:9999"
 	if cfg.Runtimes.DefaultRuntime != "claude" {
 		t.Errorf("expected default runtime claude, got %s", cfg.Runtimes.DefaultRuntime)
 	}
-	// Should get default profiles when none specified
-	if len(cfg.Runtimes.Profiles) != 3 {
-		t.Errorf("expected 3 default profiles, got %d", len(cfg.Runtimes.Profiles))
+	// Should get default profiles when none specified, including opt-in Astra.
+	if len(cfg.Runtimes.Profiles) != 4 {
+		t.Errorf("expected 4 default profiles, got %d", len(cfg.Runtimes.Profiles))
+	}
+	if astra := cfg.Runtimes.Profiles["astra"]; astra.DefaultModel != "gpt-6-astra" || astra.ReasoningEffort != "high" || astra.ServiceTier != "standard" {
+		t.Errorf("unexpected Astra profile: %+v", astra)
 	}
 }
 
@@ -202,8 +205,8 @@ write_allowlist = [
 	if !cfg.Runtimes.PreserveLegacyRuntimeIDs {
 		t.Error("expected preserve_legacy_runtime_ids true")
 	}
-	if len(cfg.Runtimes.Profiles) != 3 {
-		t.Errorf("expected 3 profiles, got %d", len(cfg.Runtimes.Profiles))
+	if len(cfg.Runtimes.Profiles) != 4 {
+		t.Errorf("expected 4 profiles after opt-in defaults, got %d", len(cfg.Runtimes.Profiles))
 	}
 	codex := cfg.Runtimes.Profiles["codex"]
 	if codex.Provider != "openai" {

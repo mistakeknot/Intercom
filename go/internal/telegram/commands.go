@@ -21,6 +21,7 @@ func ModelCatalog() []ModelEntry {
 		{ID: "gemini-3.1-pro", Runtime: "gemini", DisplayName: "Gemini 3.1 Pro"},
 		{ID: "gemini-2.5-flash", Runtime: "gemini", DisplayName: "Gemini 2.5 Flash"},
 		{ID: "gpt-5.3-codex", Runtime: "codex", DisplayName: "GPT-5.3 Codex"},
+		{ID: "gpt-6-astra", Runtime: "codex", DisplayName: "GPT-6 Astra (opt-in)"},
 	}
 }
 

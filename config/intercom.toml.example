@@ -34,8 +34,24 @@ required_env = [
 ]
 
 [runtimes.profiles.codex]
+runtime = "codex"
 provider = "openai"
 default_model = "gpt-5.3-codex"
+required_env = [
+  "CODEX_OAUTH_ACCESS_TOKEN",
+  "CODEX_OAUTH_REFRESH_TOKEN",
+  "CODEX_OAUTH_ID_TOKEN",
+  "CODEX_OAUTH_ACCOUNT_ID",
+]
+
+# Available for per-group opt-in via `/model gpt-6-astra`.
+# The estate default remains Claude until the Astra canary passes.
+[runtimes.profiles.astra]
+runtime = "codex"
+provider = "openai"
+default_model = "gpt-6-astra"
+reasoning_effort = "high"
+service_tier = "standard"
 required_env = [
   "CODEX_OAUTH_ACCESS_TOKEN",
   "CODEX_OAUTH_REFRESH_TOKEN",

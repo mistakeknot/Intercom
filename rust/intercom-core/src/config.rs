@@ -125,16 +125,22 @@ impl Default for RuntimeConfig {
         profiles.insert(
             "claude".to_string(),
             RuntimeProfile {
+                runtime: Some("claude".to_string()),
                 provider: "anthropic".to_string(),
                 default_model: "claude-opus-4-6".to_string(),
+                reasoning_effort: None,
+                service_tier: None,
                 required_env: vec!["CLAUDE_CODE_OAUTH_TOKEN".to_string()],
             },
         );
         profiles.insert(
             "gemini".to_string(),
             RuntimeProfile {
+                runtime: Some("gemini".to_string()),
                 provider: "code-assist".to_string(),
                 default_model: "gemini-3.1-pro".to_string(),
+                reasoning_effort: None,
+                service_tier: None,
                 required_env: vec![
                     "GEMINI_REFRESH_TOKEN".to_string(),
                     "GEMINI_OAUTH_CLIENT_ID".to_string(),
@@ -145,8 +151,11 @@ impl Default for RuntimeConfig {
         profiles.insert(
             "codex".to_string(),
             RuntimeProfile {
+                runtime: Some("codex".to_string()),
                 provider: "openai".to_string(),
                 default_model: "gpt-5.3-codex".to_string(),
+                reasoning_effort: None,
+                service_tier: None,
                 required_env: vec![
                     "CODEX_OAUTH_ACCESS_TOKEN".to_string(),
                     "CODEX_OAUTH_REFRESH_TOKEN".to_string(),
@@ -155,6 +164,7 @@ impl Default for RuntimeConfig {
                 ],
             },
         );
+        profiles.insert("astra".to_string(), astra_runtime_profile());
 
         Self {
             preserve_legacy_runtime_ids: true,
@@ -167,9 +177,37 @@ impl Default for RuntimeConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct RuntimeProfile {
+    /// Container backend. Defaults to the profile key/provider for old configs.
+    pub runtime: Option<String>,
     pub provider: String,
     pub default_model: String,
+    pub reasoning_effort: Option<String>,
+    pub service_tier: Option<String>,
     pub required_env: Vec<String>,
+}
+
+fn astra_runtime_profile() -> RuntimeProfile {
+    RuntimeProfile {
+        runtime: Some("codex".to_string()),
+        provider: "openai".to_string(),
+        default_model: "gpt-6-astra".to_string(),
+        reasoning_effort: Some("high".to_string()),
+        service_tier: Some("standard".to_string()),
+        required_env: vec![
+            "CODEX_OAUTH_ACCESS_TOKEN".to_string(),
+            "CODEX_OAUTH_REFRESH_TOKEN".to_string(),
+            "CODEX_OAUTH_ID_TOKEN".to_string(),
+            "CODEX_OAUTH_ACCOUNT_ID".to_string(),
+        ],
+    }
+}
+
+impl RuntimeConfig {
+    fn ensure_opt_in_profiles(&mut self) {
+        self.profiles
+            .entry("astra".to_string())
+            .or_insert_with(astra_runtime_profile);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,8 +325,9 @@ pub fn load_config(path: impl AsRef<Path>) -> anyhow::Result<IntercomConfig> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("failed to read config file: {}", path.display()))?;
 
-    let parsed: IntercomConfig = toml::from_str(&raw)
+    let mut parsed: IntercomConfig = toml::from_str(&raw)
         .with_context(|| format!("failed to parse config file: {}", path.display()))?;
+    parsed.runtimes.ensure_opt_in_profiles();
 
     Ok(parsed.with_env_overrides())
 }
@@ -322,11 +361,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_config_has_three_runtime_profiles() {
+    fn default_config_includes_opt_in_astra_profile() {
         let cfg = IntercomConfig::default();
         assert!(cfg.runtimes.profiles.contains_key("claude"));
         assert!(cfg.runtimes.profiles.contains_key("gemini"));
         assert!(cfg.runtimes.profiles.contains_key("codex"));
+        let astra = cfg.runtimes.profiles.get("astra").expect("Astra profile");
+        assert_eq!(astra.runtime.as_deref(), Some("codex"));
+        assert_eq!(astra.default_model, "gpt-6-astra");
+        assert_eq!(astra.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(astra.service_tier.as_deref(), Some("standard"));
     }
 
     #[test]
@@ -342,5 +386,39 @@ mod tests {
         assert_eq!(parsed.server.bind, "127.0.0.1:9999");
         assert_eq!(parsed.server.request_timeout_ms, 30_000);
         assert!(parsed.runtimes.profiles.contains_key("claude"));
+    }
+
+    #[test]
+    fn load_config_adds_astra_without_replacing_existing_profiles() {
+        let path = std::env::temp_dir().join(format!(
+            "intercom-astra-profile-{}.toml",
+            std::process::id(),
+        ));
+        fs::write(
+            &path,
+            r#"
+            [runtimes]
+            default_runtime = "claude"
+
+            [runtimes.profiles.claude]
+            provider = "anthropic"
+            default_model = "claude-custom"
+            required_env = []
+            "#,
+        )
+        .expect("write config");
+
+        let loaded = load_config(&path).expect("load config");
+        let _ = fs::remove_file(path);
+
+        assert_eq!(
+            loaded.runtimes.profiles["claude"].default_model,
+            "claude-custom",
+        );
+        assert_eq!(
+            loaded.runtimes.profiles["astra"].default_model,
+            "gpt-6-astra",
+        );
+        assert_eq!(loaded.runtimes.default_runtime, "claude");
     }
 }

@@ -398,6 +398,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
                 state.telegram.clone(),
                 assistant_name.clone(),
                 state.config.orchestrator.main_group_folder.clone(),
+                state.config.runtimes.clone(),
                 run_config.clone(),
                 state.config.pool.clone(),
             );
@@ -502,6 +503,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
                 state.groups.clone(),
                 state.sessions.clone(),
                 state.telegram.clone(),
+                state.config.runtimes.clone(),
                 run_config,
                 state.config.scheduler.timezone.clone(),
                 state.config.pool.clone(),

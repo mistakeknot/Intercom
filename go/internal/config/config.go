@@ -37,9 +37,12 @@ type RuntimesConfig struct {
 }
 
 type RuntimeProfile struct {
-	Provider     string   `toml:"provider"`
-	DefaultModel string   `toml:"default_model"`
-	RequiredEnv  []string `toml:"required_env"`
+	Runtime         string   `toml:"runtime"`
+	Provider        string   `toml:"provider"`
+	DefaultModel    string   `toml:"default_model"`
+	ReasoningEffort string   `toml:"reasoning_effort"`
+	ServiceTier     string   `toml:"service_tier"`
+	RequiredEnv     []string `toml:"required_env"`
 }
 
 type OrchestratorConfig struct {
@@ -129,6 +132,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Runtimes.Profiles == nil {
 		cfg.Runtimes.Profiles = defaultProfiles()
 	}
+	if _, ok := cfg.Runtimes.Profiles["astra"]; !ok {
+		cfg.Runtimes.Profiles["astra"] = astraRuntimeProfile()
+	}
 	if cfg.Orchestrator.MaxConcurrentContainers == 0 {
 		cfg.Orchestrator.MaxConcurrentContainers = 3
 	}
@@ -182,11 +188,13 @@ func applyDefaults(cfg *Config) {
 func defaultProfiles() map[string]RuntimeProfile {
 	return map[string]RuntimeProfile{
 		"claude": {
+			Runtime:      "claude",
 			Provider:     "anthropic",
 			DefaultModel: "claude-opus-4-6",
 			RequiredEnv:  []string{"CLAUDE_CODE_OAUTH_TOKEN"},
 		},
 		"gemini": {
+			Runtime:      "gemini",
 			Provider:     "code-assist",
 			DefaultModel: "gemini-3.1-pro",
 			RequiredEnv: []string{
@@ -196,6 +204,7 @@ func defaultProfiles() map[string]RuntimeProfile {
 			},
 		},
 		"codex": {
+			Runtime:      "codex",
 			Provider:     "openai",
 			DefaultModel: "gpt-5.3-codex",
 			RequiredEnv: []string{
@@ -204,6 +213,23 @@ func defaultProfiles() map[string]RuntimeProfile {
 				"CODEX_OAUTH_ID_TOKEN",
 				"CODEX_OAUTH_ACCOUNT_ID",
 			},
+		},
+		"astra": astraRuntimeProfile(),
+	}
+}
+
+func astraRuntimeProfile() RuntimeProfile {
+	return RuntimeProfile{
+		Runtime:         "codex",
+		Provider:        "openai",
+		DefaultModel:    "gpt-6-astra",
+		ReasoningEffort: "high",
+		ServiceTier:     "standard",
+		RequiredEnv: []string{
+			"CODEX_OAUTH_ACCESS_TOKEN",
+			"CODEX_OAUTH_REFRESH_TOKEN",
+			"CODEX_OAUTH_ID_TOKEN",
+			"CODEX_OAUTH_ACCOUNT_ID",
 		},
 	}
 }

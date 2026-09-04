@@ -32,6 +32,10 @@ pub struct ContainerInput {
     pub assistant_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
     /// Secrets injected via stdin, never written to disk.
     /// Zeroed from memory after writing to the container process.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -162,6 +166,8 @@ mod tests {
             is_scheduled_task: None,
             assistant_name: Some("Amtiskaw".to_string()),
             model: None,
+            reasoning_effort: Some("high".to_string()),
+            service_tier: Some("standard".to_string()),
             secrets: None,
             previous_context: None,
         };
@@ -173,6 +179,8 @@ mod tests {
         // Optional None fields should be absent
         assert!(!json.contains("\"model\""));
         assert!(!json.contains("\"secrets\""));
+        assert!(json.contains("\"reasoningEffort\":\"high\""));
+        assert!(json.contains("\"serviceTier\":\"standard\""));
         // previous_context: None should be absent
         assert!(!json.contains("\"previousContext\""));
     }

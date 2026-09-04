@@ -32,7 +32,7 @@ ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Install Codex CLI globally (the runner spawns `codex exec` as subprocess)
-RUN npm install -g @openai/codex
+RUN npm install -g @openai/codex@0.153.2
 
 # Create app directory with same structure as source
 WORKDIR /app/codex-runner
