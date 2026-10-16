@@ -240,7 +240,6 @@ func defaultReadAllowlist() []string {
 		"ic run status --json",
 		"ic run phase --json",
 		"ic run artifact list --json",
-		"ic run artifact get --json",
 		"ic run tokens --json",
 		"ic dispatch list --json",
 		"ic events tail --consumer=intercom --json",

@@ -66,16 +66,108 @@ describe('query-handlers', () => {
     });
   });
 
+  // Stubs below mirror real ic output: `run current --json` emits
+  // {found, id, phase, goal}; `run phase <id>` prints the bare phase name;
+  // `run artifact list <id> --json` emits an array of artifacts.
   describe('sprint_phase handler', () => {
-    it('returns current phase', () => {
-      mockExecFileSync.mockImplementation((bin: string) => {
+    it('resolves the active run, then reads its phase', () => {
+      const calls: string[][] = [];
+      mockExecFileSync.mockImplementation((bin: string, args?: readonly string[]) => {
         if (bin === 'which') return '/usr/local/bin/ic';
-        return '{"phase":"executing","run_id":"run-1"}';
+        const argList = [...(args as string[])];
+        calls.push(argList);
+        if (argList.join(' ') === 'run current --json') {
+          return '{"found":true,"goal":"g","id":"run-1","phase":"executing"}';
+        }
+        if (argList.join(' ') === 'run phase run-1') return 'executing\n';
+        throw new Error(`unexpected ic ${argList.join(' ')}`);
       });
 
       const result = handleQuery('sprint_phase', {}, 'main', true);
       expect(result.status).toBe('ok');
-      expect(result.result).toContain('executing');
+      expect(JSON.parse(result.result)).toEqual({ run_id: 'run-1', phase: 'executing' });
+      expect(calls).toEqual([['run', 'current', '--json'], ['run', 'phase', 'run-1']]);
+    });
+
+    it('uses runId without resolving the active run', () => {
+      mockExecFileSync.mockImplementation((bin: string, args?: readonly string[]) => {
+        if (bin === 'which') return '/usr/local/bin/ic';
+        expect(args).toEqual(['run', 'phase', 'run-9']);
+        return 'review';
+      });
+
+      const result = handleQuery('sprint_phase', { runId: 'run-9' }, 'main', true);
+      expect(result.status).toBe('ok');
+      expect(JSON.parse(result.result)).toEqual({ run_id: 'run-9', phase: 'review' });
+    });
+
+    it('returns an error when there is no active run', () => {
+      mockExecFileSync.mockImplementation((bin: string) => {
+        if (bin === 'which') return '/usr/local/bin/ic';
+        // ic exits 1 after printing {"found":false}; execFileSync throws.
+        throw new Error('Command failed: ic run current --json');
+      });
+
+      const result = handleQuery('sprint_phase', {}, 'main', true);
+      expect(result.status).toBe('error');
+    });
+  });
+
+  describe('spec_lookup handler', () => {
+    const artifacts = '[{"id":"art-1","run_id":"run-1","phase":"brainstorm","path":"spec.md","type":"prd"},' +
+      '{"id":"art-2","run_id":"run-1","phase":"strategy","path":"plan.md","type":"plan"}]';
+
+    function stubIc(listOutput = artifacts) {
+      mockExecFileSync.mockImplementation((bin: string, args?: readonly string[]) => {
+        if (bin === 'which') return '/usr/local/bin/ic';
+        const joined = (args as string[]).join(' ');
+        if (joined === 'run current --json') return '{"found":true,"goal":"g","id":"run-1","phase":"executing"}';
+        if (joined === 'run artifact list run-1 --json') return listOutput;
+        throw new Error(`unexpected ic ${joined}`);
+      });
+    }
+
+    it('lists artifacts for the active run', () => {
+      stubIc();
+      const result = handleQuery('spec_lookup', {}, 'main', true);
+      expect(result.status).toBe('ok');
+      expect(JSON.parse(result.result)).toHaveLength(2);
+    });
+
+    it('selects one artifact by id from the run list', () => {
+      stubIc();
+      const result = handleQuery('spec_lookup', { artifactId: 'art-2' }, 'main', true);
+      expect(result.status).toBe('ok');
+      expect(JSON.parse(result.result)).toMatchObject({ id: 'art-2', path: 'plan.md' });
+    });
+
+    it('reports an unknown artifact id as not found', () => {
+      stubIc();
+      const result = handleQuery('spec_lookup', { artifactId: 'missing' }, 'main', true);
+      expect(result.status).toBe('error');
+      expect(result.result).toContain('missing');
+    });
+
+    it('returns an empty list for a run with no artifacts', () => {
+      stubIc('[]');
+      const result = handleQuery('spec_lookup', {}, 'main', true);
+      expect(result).toEqual({ status: 'ok', result: '[]' });
+    });
+
+    it('rejects artifact list output that is not a JSON array', () => {
+      for (const output of ['', 'not json', '{"id":"art-1"}']) {
+        stubIc(output);
+        const result = handleQuery('spec_lookup', {}, 'main', true);
+        expect(result.status).toBe('error');
+      }
+    });
+
+    it('never calls the nonexistent ic run artifact get', () => {
+      stubIc();
+      handleQuery('spec_lookup', { artifactId: 'art-1' }, 'main', true);
+      for (const call of mockExecFileSync.mock.calls) {
+        expect((call[1] as string[]).join(' ')).not.toContain('artifact get');
+      }
     });
   });
 

@@ -570,7 +570,8 @@ impl IpcWatcher {
                 response_from_demarch(resp)
             }
             "sprint_phase" => {
-                let resp = self.demarch.execute_read(ReadOperation::SprintPhase);
+                let run_id = params.get("runId").and_then(|v| v.as_str()).map(String::from);
+                let resp = self.demarch.execute_read(ReadOperation::SprintPhase { run_id });
                 response_from_demarch(resp)
             }
             "search_beads" => {
@@ -589,9 +590,11 @@ impl IpcWatcher {
                     .get("artifactId")
                     .and_then(|v| v.as_str())
                     .map(String::from);
-                let resp = self
-                    .demarch
-                    .execute_read(ReadOperation::SpecLookup { artifact_id });
+                let run_id = params.get("runId").and_then(|v| v.as_str()).map(String::from);
+                let resp = self.demarch.execute_read(ReadOperation::SpecLookup {
+                    run_id,
+                    artifact_id,
+                });
                 response_from_demarch(resp)
             }
             "review_summary" => {

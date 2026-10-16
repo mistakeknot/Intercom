@@ -98,7 +98,7 @@ Container Agent
 ├── Existing tools (shell, file I/O, IPC)
 └── New: Demarch tools
     ├── demarch_run_status     → ic run current/status --json
-    ├── demarch_sprint_phase   → ic run phase --json
+    ├── demarch_sprint_phase   → ic run current --json, then ic run phase <id>
     ├── demarch_search_beads   → bd list/show
     ├── demarch_research       → Pollard query or ic discovery search
     ├── demarch_spec_lookup    → ic run artifact list + read
