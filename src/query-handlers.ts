@@ -91,14 +91,40 @@ function handleRunStatus(params: Record<string, unknown>): QueryResponse {
   return { status: 'ok', result };
 }
 
-function handleSprintPhase(_params: Record<string, unknown>): QueryResponse {
+/**
+ * Resolve the run to query: the caller's runId, else the active run for the
+ * project from `ic run current --json` ({found, id, phase, goal}).
+ * Returns null when there is no active run or ic fails.
+ */
+function resolveRunId(params: Record<string, unknown>): string | null {
+  const runId = params.runId as string | undefined;
+  if (runId) return runId;
+
+  const current = execCli('ic', ['run', 'current', '--json']);
+  if (current === null) return null;
+  try {
+    const parsed = JSON.parse(current) as { found?: boolean; id?: unknown };
+    if (parsed.found === false || typeof parsed.id !== 'string' || !parsed.id) return null;
+    return parsed.id;
+  } catch {
+    return null;
+  }
+}
+
+function handleSprintPhase(params: Record<string, unknown>): QueryResponse {
   if (!isCliAvailable('ic')) return { status: 'error', result: STANDALONE_MSG };
 
-  const result = execCli('ic', ['run', 'phase', '--json']);
-  if (result === null) {
+  const runId = resolveRunId(params);
+  if (runId === null) {
     return { status: 'error', result: 'No active sprint phase or ic command failed.' };
   }
-  return { status: 'ok', result };
+
+  // `ic run phase <id>` prints the bare phase name, not JSON.
+  const phase = execCli('ic', ['run', 'phase', runId]);
+  if (phase === null || phase === '') {
+    return { status: 'error', result: `No phase found for run ${runId}.` };
+  }
+  return { status: 'ok', result: JSON.stringify({ run_id: runId, phase }) };
 }
 
 function handleSearchBeads(params: Record<string, unknown>): QueryResponse {
@@ -130,20 +156,28 @@ function handleSearchBeads(params: Record<string, unknown>): QueryResponse {
 function handleSpecLookup(params: Record<string, unknown>): QueryResponse {
   if (!isCliAvailable('ic')) return { status: 'error', result: STANDALONE_MSG };
 
-  const artifactId = params.artifactId as string | undefined;
-  if (artifactId) {
-    const result = execCli('ic', ['run', 'artifact', 'get', artifactId, '--json']);
-    if (result === null) {
-      return { status: 'error', result: `Artifact ${artifactId} not found.` };
-    }
-    return { status: 'ok', result };
+  const runId = resolveRunId(params);
+  if (runId === null) {
+    return { status: 'error', result: 'No active run found or ic command failed.' };
   }
 
-  const result = execCli('ic', ['run', 'artifact', 'list', '--json']);
+  const result = execCli('ic', ['run', 'artifact', 'list', runId, '--json']);
   if (result === null) {
     return { status: 'error', result: 'No artifacts found or ic command failed.' };
   }
-  return { status: 'ok', result };
+
+  // ic has no `run artifact get`; select the artifact from the run's list.
+  const artifactId = params.artifactId as string | undefined;
+  if (!artifactId) return { status: 'ok', result };
+
+  try {
+    const artifacts = JSON.parse(result) as Array<{ id?: unknown }>;
+    const match = Array.isArray(artifacts)
+      ? artifacts.find((a) => a && a.id === artifactId)
+      : undefined;
+    if (match) return { status: 'ok', result: JSON.stringify(match) };
+  } catch { /* fall through to not-found */ }
+  return { status: 'error', result: `Artifact ${artifactId} not found in run ${runId}.` };
 }
 
 function handleReviewSummary(_params: Record<string, unknown>): QueryResponse {

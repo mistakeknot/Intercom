@@ -33,16 +33,22 @@ func NewIntercoreRouter() *IntercoreRouter {
 	return &IntercoreRouter{Timeout: 5 * time.Second}
 }
 
+// icRouteResult mirrors `ic route model --json`, which emits
+// {model, phase, category, agent}. ic does not report a runtime, so the
+// runtime is inferred from the model ID.
 type icRouteResult struct {
-	Model   string `json:"model"`
-	Runtime string `json:"runtime"`
+	Model    string `json:"model"`
+	Phase    string `json:"phase"`
+	Category string `json:"category"`
+	Agent    string `json:"agent"`
 }
 
 func (r *IntercoreRouter) SelectModel(ctx context.Context, phase string) (string, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.Timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "ic", "route", "model", "--phase", phase, "--json")
+	// ic parses only the --flag=value form; "--phase X" leaves phase unset.
+	cmd := exec.CommandContext(ctx, "ic", "route", "model", "--phase="+phase, "--json")
 	out, err := cmd.Output()
 	if err != nil {
 		return "", "", fmt.Errorf("ic route model: %w", err)
@@ -52,7 +58,10 @@ func (r *IntercoreRouter) SelectModel(ctx context.Context, phase string) (string
 	if err := json.Unmarshal(out, &result); err != nil {
 		return "", "", fmt.Errorf("ic route model: parse: %w", err)
 	}
-	return result.Model, result.Runtime, nil
+	if result.Model == "" {
+		return "", "", fmt.Errorf("ic route model: empty model")
+	}
+	return result.Model, RuntimeForModel(result.Model), nil
 }
 
 // FallbackRouter tries IntercoreRouter, falls back to ConfigRouter on error.
