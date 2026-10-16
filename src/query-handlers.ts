@@ -86,7 +86,10 @@ function handleRunStatus(params: Record<string, unknown>): QueryResponse {
     : ['run', 'current', '--json'];
   const result = execCli('ic', args);
   if (result === null) {
-    return { status: 'error', result: 'No active run found or ic command failed.' };
+    return {
+      status: 'error',
+      result: 'No active run found or ic command failed.',
+    };
   }
   return { status: 'ok', result };
 }
@@ -104,7 +107,8 @@ function resolveRunId(params: Record<string, unknown>): string | null {
   if (current === null) return null;
   try {
     const parsed = JSON.parse(current) as { found?: boolean; id?: unknown };
-    if (parsed.found === false || typeof parsed.id !== 'string' || !parsed.id) return null;
+    if (parsed.found === false || typeof parsed.id !== 'string' || !parsed.id)
+      return null;
     return parsed.id;
   } catch {
     return null;
@@ -116,7 +120,10 @@ function handleSprintPhase(params: Record<string, unknown>): QueryResponse {
 
   const runId = resolveRunId(params);
   if (runId === null) {
-    return { status: 'error', result: 'No active sprint phase or ic command failed.' };
+    return {
+      status: 'error',
+      result: 'No active sprint phase or ic command failed.',
+    };
   }
 
   // `ic run phase <id>` prints the bare phase name, not JSON.
@@ -158,41 +165,59 @@ function handleSpecLookup(params: Record<string, unknown>): QueryResponse {
 
   const runId = resolveRunId(params);
   if (runId === null) {
-    return { status: 'error', result: 'No active run found or ic command failed.' };
+    return {
+      status: 'error',
+      result: 'No active run found or ic command failed.',
+    };
   }
 
   const result = execCli('ic', ['run', 'artifact', 'list', runId, '--json']);
   if (result === null) {
-    return { status: 'error', result: 'No artifacts found or ic command failed.' };
+    return {
+      status: 'error',
+      result: 'No artifacts found or ic command failed.',
+    };
+  }
+
+  // `ic run artifact list --json` prints an array, `[]` when the run has none.
+  let artifacts: unknown;
+  try {
+    artifacts = JSON.parse(result);
+  } catch {
+    artifacts = undefined;
+  }
+  if (!Array.isArray(artifacts)) {
+    return {
+      status: 'error',
+      result: `Unexpected ic run artifact list output: ${result}`,
+    };
   }
 
   // ic has no `run artifact get`; select the artifact from the run's list.
   const artifactId = params.artifactId as string | undefined;
   if (!artifactId) return { status: 'ok', result };
 
-  try {
-    const artifacts = JSON.parse(result) as Array<{ id?: unknown }>;
-    const match = Array.isArray(artifacts)
-      ? artifacts.find((a) => a && a.id === artifactId)
-      : undefined;
-    if (match) return { status: 'ok', result: JSON.stringify(match) };
-  } catch { /* fall through to not-found */ }
-  return { status: 'error', result: `Artifact ${artifactId} not found in run ${runId}.` };
+  const match = (artifacts as Array<{ id?: unknown } | null>).find(
+    (a) => a && a.id === artifactId,
+  );
+  if (match) return { status: 'ok', result: JSON.stringify(match) };
+  return {
+    status: 'error',
+    result: `Artifact ${artifactId} not found in run ${runId}.`,
+  };
 }
 
 function handleReviewSummary(_params: Record<string, unknown>): QueryResponse {
   // Read latest verdict files from flux-drive research output
-  const searchDirs = [
-    'docs/research/flux-drive',
-    'docs/research',
-  ];
+  const searchDirs = ['docs/research/flux-drive', 'docs/research'];
 
   for (const dir of searchDirs) {
     const fullDir = path.resolve(dir);
     if (!fs.existsSync(fullDir)) continue;
 
     try {
-      const files = fs.readdirSync(fullDir)
+      const files = fs
+        .readdirSync(fullDir)
         .filter((f) => f.endsWith('.json') && f.includes('verdict'))
         .sort()
         .reverse()
@@ -200,16 +225,22 @@ function handleReviewSummary(_params: Record<string, unknown>): QueryResponse {
 
       if (files.length === 0) continue;
 
-      const verdicts = files.map((f) => {
-        try {
-          return fs.readFileSync(path.join(fullDir, f), 'utf-8');
-        } catch { return null; }
-      }).filter(Boolean);
+      const verdicts = files
+        .map((f) => {
+          try {
+            return fs.readFileSync(path.join(fullDir, f), 'utf-8');
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean);
 
       if (verdicts.length > 0) {
         return { status: 'ok', result: `[${verdicts.join(',')}]` };
       }
-    } catch { /* continue to next dir */ }
+    } catch {
+      /* continue to next dir */
+    }
   }
 
   return { status: 'error', result: 'No review verdicts found.' };
@@ -238,7 +269,8 @@ function handleResearch(params: Record<string, unknown>): QueryResponse {
   if (result === null) {
     return {
       status: 'error',
-      result: 'Research tool not available — ic discovery subcommand may not exist yet.',
+      result:
+        'Research tool not available — ic discovery subcommand may not exist yet.',
     };
   }
   return { status: 'ok', result };
@@ -250,7 +282,13 @@ function handleRunEvents(params: Record<string, unknown>): QueryResponse {
   const limit = String((params.limit as number) || 20);
   const since = params.since as string | undefined;
 
-  const args = ['events', 'tail', '--consumer=intercom', '--json', `--limit=${limit}`];
+  const args = [
+    'events',
+    'tail',
+    '--consumer=intercom',
+    '--json',
+    `--limit=${limit}`,
+  ];
   if (since) args.push(`--since=${since}`);
 
   const result = execCli('ic', args);

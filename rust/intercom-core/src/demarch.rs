@@ -667,7 +667,9 @@ impl DemarchAdapter {
 
     /// Use `run_id`, or resolve the project's active run with
     /// `ic run current --json`, which emits `{found, id, phase, goal}` and
-    /// exits 1 with `{"found":false}` when there is none.
+    /// exits 1 with `{"found":false}` when there is none. Resolving needs
+    /// `ic run current --json` in the read allowlist (it is a default); a
+    /// custom allowlist without it blocks calls that pass no run id.
     fn resolve_run_id(&self, run_id: Option<String>) -> Result<String, DemarchResponse> {
         if let Some(run_id) = run_id.filter(|id| !id.is_empty()) {
             return Ok(run_id);
@@ -736,20 +738,24 @@ impl DemarchAdapter {
         .expect("artifact list plan");
 
         let response = self.execute_plan(plan, false);
-        let Some(artifact_id) = artifact_id else {
-            return response;
-        };
         if response.status == DemarchStatus::Error {
             return response;
         }
+        // `ic run artifact list --json` prints an array, `[]` when the run has none.
+        let Ok(artifacts) = serde_json::from_str::<Vec<serde_json::Value>>(&response.result)
+        else {
+            return DemarchResponse::error(format!(
+                "Unexpected ic run artifact list output: {}",
+                response.result
+            ));
+        };
+        let Some(artifact_id) = artifact_id else {
+            return response;
+        };
 
-        let found = serde_json::from_str::<Vec<serde_json::Value>>(&response.result)
-            .ok()
-            .and_then(|artifacts| {
-                artifacts
-                    .into_iter()
-                    .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(artifact_id.as_str()))
-            });
+        let found = artifacts
+            .into_iter()
+            .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(artifact_id.as_str()));
         match found {
             Some(artifact) => DemarchResponse::ok(artifact.to_string()),
             None => DemarchResponse::error(format!(
@@ -1055,6 +1061,29 @@ mod tests {
                 artifact_id: None
             }
         );
+    }
+
+    #[test]
+    fn run_scoped_reads_need_run_current_in_allowlist_without_run_id() {
+        let config = DemarchConfig {
+            read_allowlist: vec![
+                "ic run phase --json".to_string(),
+                "ic run artifact list --json".to_string(),
+            ],
+            ..DemarchConfig::default()
+        };
+        let adapter = DemarchAdapter::new(config, std::env::temp_dir());
+
+        let phase = adapter.execute_read(ReadOperation::SprintPhase { run_id: None });
+        assert_eq!(phase.status, DemarchStatus::Error);
+        assert!(phase.result.contains("ic run current --json"), "{}", phase.result);
+
+        let list = adapter.execute_read(ReadOperation::SpecLookup {
+            run_id: None,
+            artifact_id: None,
+        });
+        assert_eq!(list.status, DemarchStatus::Error);
+        assert!(list.result.contains("ic run current --json"), "{}", list.result);
     }
 
     fn ic(dir: &Path, args: &[&str]) -> String {
