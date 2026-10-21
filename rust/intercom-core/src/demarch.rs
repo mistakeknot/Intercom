@@ -45,13 +45,22 @@ pub enum ReadOperation {
     RunStatus {
         run_id: Option<String>,
     },
-    SprintPhase,
+    /// Phase of `run_id`, or of the project's active run when `None`.
+    SprintPhase {
+        #[serde(default)]
+        run_id: Option<String>,
+    },
     SearchBeads {
         id: Option<String>,
         query: Option<String>,
         status: Option<String>,
     },
+    /// Artifacts of `run_id` (or the active run); one artifact when
+    /// `artifact_id` is set.
     SpecLookup {
+        #[serde(default)]
+        run_id: Option<String>,
+        #[serde(default)]
         artifact_id: Option<String>,
     },
     ReviewSummary,
@@ -174,6 +183,11 @@ impl DemarchAdapter {
 
         match operation {
             ReadOperation::ReviewSummary => self.handle_review_summary(),
+            ReadOperation::SprintPhase { run_id } => self.handle_sprint_phase(run_id),
+            ReadOperation::SpecLookup {
+                run_id,
+                artifact_id,
+            } => self.handle_spec_lookup(run_id, artifact_id),
             op => match Self::plan_read(&op) {
                 Some(plan) => self.execute_plan(plan, false),
                 None => DemarchResponse::error("Read operation is not implemented."),
@@ -194,6 +208,9 @@ impl DemarchAdapter {
         self.execute_plan(plan, true)
     }
 
+    /// Plan the single ic/bd call for a read. Returns `None` for reads that
+    /// are not one command: `ReviewSummary`, and `SprintPhase`/`SpecLookup`
+    /// without a run id (`execute_read` resolves the active run first).
     pub fn plan_read(operation: &ReadOperation) -> Option<DemarchCommandPlan> {
         match operation {
             ReadOperation::RunStatus { run_id } => {
@@ -225,10 +242,12 @@ impl DemarchAdapter {
                     stdin: None,
                 })
             }
-            ReadOperation::SprintPhase => Some(DemarchCommandPlan {
+            // `ic run phase <id>` prints the bare phase name; it has no JSON
+            // form. The signature keeps its historical allowlist spelling.
+            ReadOperation::SprintPhase { run_id } => run_id.as_ref().map(|run_id| DemarchCommandPlan {
                 bin: "ic",
                 signature: "ic run phase --json",
-                args: vec!["run".to_string(), "phase".to_string(), "--json".to_string()],
+                args: vec!["run".to_string(), "phase".to_string(), run_id.clone()],
                 stdin: None,
             }),
             ReadOperation::SearchBeads { id, query, status } => {
@@ -256,37 +275,20 @@ impl DemarchAdapter {
                     stdin: None,
                 })
             }
-            ReadOperation::SpecLookup { artifact_id } => {
-                let args = if let Some(artifact_id) = artifact_id {
-                    vec![
-                        "run".to_string(),
-                        "artifact".to_string(),
-                        "get".to_string(),
-                        artifact_id.clone(),
-                        "--json".to_string(),
-                    ]
-                } else {
-                    vec![
-                        "run".to_string(),
-                        "artifact".to_string(),
-                        "list".to_string(),
-                        "--json".to_string(),
-                    ]
-                };
-
-                let signature = if artifact_id.is_some() {
-                    "ic run artifact get --json"
-                } else {
-                    "ic run artifact list --json"
-                };
-
-                Some(DemarchCommandPlan {
-                    bin: "ic",
-                    signature,
-                    args,
-                    stdin: None,
-                })
-            }
+            // ic has no `run artifact get`; a single artifact is selected
+            // from this list by `handle_spec_lookup`.
+            ReadOperation::SpecLookup { run_id, .. } => run_id.as_ref().map(|run_id| DemarchCommandPlan {
+                bin: "ic",
+                signature: "ic run artifact list --json",
+                args: vec![
+                    "run".to_string(),
+                    "artifact".to_string(),
+                    "list".to_string(),
+                    run_id.clone(),
+                    "--json".to_string(),
+                ],
+                stdin: None,
+            }),
             ReadOperation::ReviewSummary => None,
             ReadOperation::NextWork => Some(DemarchCommandPlan {
                 bin: "bd",
@@ -663,6 +665,105 @@ impl DemarchAdapter {
         )))
     }
 
+    /// Use `run_id`, or resolve the project's active run with
+    /// `ic run current --json`, which emits `{found, id, phase, goal}` and
+    /// exits 1 with `{"found":false}` when there is none. Resolving needs
+    /// `ic run current --json` in the read allowlist (it is a default); a
+    /// custom allowlist without it blocks calls that pass no run id.
+    fn resolve_run_id(&self, run_id: Option<String>) -> Result<String, DemarchResponse> {
+        if let Some(run_id) = run_id.filter(|id| !id.is_empty()) {
+            return Ok(run_id);
+        }
+
+        let plan = Self::plan_read(&ReadOperation::RunStatus { run_id: None })
+            .expect("run current plan");
+        let response = self.execute_plan(plan, false);
+        let parsed = serde_json::from_str::<serde_json::Value>(&response.result).ok();
+        let found = parsed
+            .as_ref()
+            .and_then(|v| v.get("found"))
+            .and_then(|v| v.as_bool());
+        let id = parsed
+            .as_ref()
+            .and_then(|v| v.get("id"))
+            .and_then(|v| v.as_str())
+            .filter(|id| !id.is_empty());
+
+        match (&response.status, found, id) {
+            (DemarchStatus::Ok, Some(true), Some(id)) => Ok(id.to_string()),
+            (_, Some(false), _) => Err(DemarchResponse::error("No active run found.")),
+            (DemarchStatus::Error, _, _) => Err(response),
+            _ => Err(DemarchResponse::error(format!(
+                "Unexpected ic run current output: {}",
+                response.result
+            ))),
+        }
+    }
+
+    fn handle_sprint_phase(&self, run_id: Option<String>) -> DemarchResponse {
+        let run_id = match self.resolve_run_id(run_id) {
+            Ok(run_id) => run_id,
+            Err(response) => return response,
+        };
+        let plan = Self::plan_read(&ReadOperation::SprintPhase {
+            run_id: Some(run_id.clone()),
+        })
+        .expect("run phase plan");
+
+        let response = self.execute_plan(plan, false);
+        if response.status == DemarchStatus::Error {
+            return response;
+        }
+        if response.result.is_empty() {
+            return DemarchResponse::error(format!("No phase found for run {run_id}."));
+        }
+        DemarchResponse::ok(
+            serde_json::json!({ "run_id": run_id, "phase": response.result }).to_string(),
+        )
+    }
+
+    fn handle_spec_lookup(
+        &self,
+        run_id: Option<String>,
+        artifact_id: Option<String>,
+    ) -> DemarchResponse {
+        let run_id = match self.resolve_run_id(run_id) {
+            Ok(run_id) => run_id,
+            Err(response) => return response,
+        };
+        let plan = Self::plan_read(&ReadOperation::SpecLookup {
+            run_id: Some(run_id.clone()),
+            artifact_id: None,
+        })
+        .expect("artifact list plan");
+
+        let response = self.execute_plan(plan, false);
+        if response.status == DemarchStatus::Error {
+            return response;
+        }
+        // `ic run artifact list --json` prints an array, `[]` when the run has none.
+        let Ok(artifacts) = serde_json::from_str::<Vec<serde_json::Value>>(&response.result)
+        else {
+            return DemarchResponse::error(format!(
+                "Unexpected ic run artifact list output: {}",
+                response.result
+            ));
+        };
+        let Some(artifact_id) = artifact_id else {
+            return response;
+        };
+
+        let found = artifacts
+            .into_iter()
+            .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(artifact_id.as_str()));
+        match found {
+            Some(artifact) => DemarchResponse::ok(artifact.to_string()),
+            None => DemarchResponse::error(format!(
+                "Artifact {artifact_id} not found in run {run_id}."
+            )),
+        }
+    }
+
     fn handle_review_summary(&self) -> DemarchResponse {
         let search_dirs = [
             self.project_root.join("docs/research/flux-drive"),
@@ -912,6 +1013,178 @@ mod tests {
         assert_eq!(plan.bin, "ic");
         assert_eq!(plan.signature, "ic dispatch list --json");
         assert!(plan.args.contains(&"--active".to_string()));
+    }
+
+    #[test]
+    fn sprint_phase_plan_passes_run_id() {
+        let plan = DemarchAdapter::plan_read(&ReadOperation::SprintPhase {
+            run_id: Some("run-1".to_string()),
+        })
+        .expect("plan");
+
+        assert_eq!(plan.bin, "ic");
+        assert_eq!(plan.signature, "ic run phase --json");
+        assert_eq!(plan.args, vec!["run", "phase", "run-1"]);
+    }
+
+    #[test]
+    fn spec_lookup_plan_lists_run_artifacts() {
+        let plan = DemarchAdapter::plan_read(&ReadOperation::SpecLookup {
+            run_id: Some("run-1".to_string()),
+            artifact_id: Some("art-1".to_string()),
+        })
+        .expect("plan");
+
+        assert_eq!(plan.signature, "ic run artifact list --json");
+        assert_eq!(plan.args, vec!["run", "artifact", "list", "run-1", "--json"]);
+    }
+
+    #[test]
+    fn run_scoped_reads_without_run_id_have_no_single_plan() {
+        assert!(DemarchAdapter::plan_read(&ReadOperation::SprintPhase { run_id: None }).is_none());
+        assert!(DemarchAdapter::plan_read(&ReadOperation::SpecLookup {
+            run_id: None,
+            artifact_id: None,
+        })
+        .is_none());
+    }
+
+    #[test]
+    fn sprint_phase_deserializes_without_run_id() {
+        let op: ReadOperation = serde_json::from_str(r#"{"op":"sprint_phase"}"#).unwrap();
+        assert_eq!(op, ReadOperation::SprintPhase { run_id: None });
+        let op: ReadOperation = serde_json::from_str(r#"{"op":"spec_lookup"}"#).unwrap();
+        assert_eq!(
+            op,
+            ReadOperation::SpecLookup {
+                run_id: None,
+                artifact_id: None
+            }
+        );
+    }
+
+    #[test]
+    fn run_scoped_reads_need_run_current_in_allowlist_without_run_id() {
+        let config = DemarchConfig {
+            read_allowlist: vec![
+                "ic run phase --json".to_string(),
+                "ic run artifact list --json".to_string(),
+            ],
+            ..DemarchConfig::default()
+        };
+        let adapter = DemarchAdapter::new(config, std::env::temp_dir());
+
+        let phase = adapter.execute_read(ReadOperation::SprintPhase { run_id: None });
+        assert_eq!(phase.status, DemarchStatus::Error);
+        assert!(phase.result.contains("ic run current --json"), "{}", phase.result);
+
+        let list = adapter.execute_read(ReadOperation::SpecLookup {
+            run_id: None,
+            artifact_id: None,
+        });
+        assert_eq!(list.status, DemarchStatus::Error);
+        assert!(list.result.contains("ic run current --json"), "{}", list.result);
+    }
+
+    fn ic(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("ic")
+            .args(args)
+            .current_dir(dir)
+            .env("PATH", build_extended_path())
+            .output()
+            .expect("spawn ic");
+        assert!(
+            out.status.success(),
+            "ic {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn json_id(raw: &str) -> String {
+        let v: serde_json::Value = serde_json::from_str(raw).expect("ic json");
+        v["id"].as_str().expect("id").to_string()
+    }
+
+    /// Runs `SprintPhase` and `SpecLookup` against the installed ic in a
+    /// throwaway intercore database. Skips when ic is not on PATH.
+    #[test]
+    fn run_scoped_reads_against_real_ic() {
+        if !is_cli_available("ic") {
+            eprintln!("skipping run_scoped_reads_against_real_ic: ic not on PATH");
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().canonicalize().expect("canonicalize");
+        ic(&dir, &["init"]);
+        let run_id = json_id(&ic(
+            &dir,
+            &[
+                "run",
+                "create",
+                &format!("--project={}", dir.display()),
+                "--goal=intercom reader test",
+                "--json",
+            ],
+        ));
+        fs::write(dir.join("spec.md"), "# spec\n").unwrap();
+        let artifact_id = json_id(&ic(
+            &dir,
+            &[
+                "run",
+                "artifact",
+                "add",
+                &run_id,
+                "--phase=brainstorm",
+                "--path=spec.md",
+                "--type=prd",
+                "--json",
+            ],
+        ));
+        let expected_phase = ic(&dir, &["run", "phase", &run_id]);
+
+        // No .beads above a temp dir, so ic runs from `dir` itself.
+        let adapter = DemarchAdapter::new(DemarchConfig::default(), &dir);
+
+        let phase = adapter.execute_read(ReadOperation::SprintPhase { run_id: None });
+        assert_eq!(phase.status, DemarchStatus::Ok, "{}", phase.result);
+        let phase: serde_json::Value = serde_json::from_str(&phase.result).unwrap();
+        assert_eq!(phase["run_id"], run_id.as_str());
+        assert_eq!(phase["phase"], expected_phase.as_str());
+
+        let phase = adapter.execute_read(ReadOperation::SprintPhase {
+            run_id: Some(run_id.clone()),
+        });
+        assert_eq!(phase.status, DemarchStatus::Ok, "{}", phase.result);
+
+        let list = adapter.execute_read(ReadOperation::SpecLookup {
+            run_id: None,
+            artifact_id: None,
+        });
+        assert_eq!(list.status, DemarchStatus::Ok, "{}", list.result);
+        let list: Vec<serde_json::Value> = serde_json::from_str(&list.result).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["id"], artifact_id.as_str());
+        assert_eq!(list[0]["run_id"], run_id.as_str());
+
+        let one = adapter.execute_read(ReadOperation::SpecLookup {
+            run_id: None,
+            artifact_id: Some(artifact_id.clone()),
+        });
+        assert_eq!(one.status, DemarchStatus::Ok, "{}", one.result);
+        let one: serde_json::Value = serde_json::from_str(&one.result).unwrap();
+        assert_eq!(one["path"], "spec.md");
+
+        let missing = adapter.execute_read(ReadOperation::SpecLookup {
+            run_id: None,
+            artifact_id: Some("no-such-artifact".to_string()),
+        });
+        assert_eq!(missing.status, DemarchStatus::Error);
+
+        ic(&dir, &["run", "cancel", &run_id]);
+        let none = adapter.execute_read(ReadOperation::SprintPhase { run_id: None });
+        assert_eq!(none.status, DemarchStatus::Error);
+        assert!(none.result.contains("No active run"), "{}", none.result);
     }
 
     #[test]
